@@ -15,6 +15,7 @@ members = [
     "compose-inference-class",
     "compose-inference-cluster",
     "compose-inference-gateway",
+    "compose-metric-mapping",
     "compose-model-cache",
     "compose-model-deployment",
     "compose-model-endpoint",
@@ -23,6 +24,7 @@ members = [
     "compose-model-service",
     "compose-nebius-cluster",
     "compose-serving-stack",
+    "compose-telemetry-destination",
     "compose-usages",
     "compose-vultr-cluster",
     "crossplane-models",
@@ -209,6 +211,25 @@ requires-dist = [
 ]
 
 [[package]]
+name = "compose-metric-mapping"
+version = "0.0.0"
+source = { editable = "functions/compose-metric-mapping" }
+dependencies = [
+    { name = "click" },
+    { name = "crossplane-function-sdk-python" },
+    { name = "crossplane-models" },
+    { name = "grpcio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "crossplane-function-sdk-python", specifier = ">=0.14.0" },
+    { name = "crossplane-models", editable = "schemas/python" },
+    { name = "grpcio", specifier = ">=1.73.1" },
+]
+
+[[package]]
 name = "compose-model-cache"
 version = "0.0.0"
 source = { editable = "functions/compose-model-cache" }
@@ -362,6 +383,25 @@ requires-dist = [
     { name = "crossplane-models", editable = "schemas/python" },
     { name = "grpcio", specifier = ">=1.73.1" },
     { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
+name = "compose-telemetry-destination"
+version = "0.0.0"
+source = { editable = "functions/compose-telemetry-destination" }
+dependencies = [
+    { name = "click" },
+    { name = "crossplane-function-sdk-python" },
+    { name = "crossplane-models" },
+    { name = "grpcio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "crossplane-function-sdk-python", specifier = ">=0.14.0" },
+    { name = "crossplane-models", editable = "schemas/python" },
+    { name = "grpcio", specifier = ">=1.73.1" },
 ]
 
 [[package]]
