@@ -5,6 +5,9 @@ _output
 result
 .direnv
 __pycache__/
+.coverage
+.coverage.*
+htmlcov/
 
 # Local superpowers planning artifacts (specs/plans/notes) — not repo content
 docs/superpowers/
