@@ -829,7 +829,12 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
 
 def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -> fnv1.RunFunctionResponse:
-    """A whole expected response: 60s TTL, empty context, the XR status."""
+    """A whole expected response: 60s TTL, empty context, the XR status.
+
+    Every response asks for the telemetry kinds, because the collector is
+    composed from them and the function cannot know whether any exist until
+    they resolve.
+    """
     return fnv1.RunFunctionResponse(
         meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
         desired=fnv1.State(
@@ -837,6 +842,14 @@ def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -
             resources=resources,
         ),
         context=structpb.Struct(),
+        requirements=fnv1.Requirements(
+            resources={
+                "destinations": fnv1.ResourceSelector(
+                    api_version="modelplane.ai/v1alpha1", kind="TelemetryDestination"
+                ),
+                "mappings": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="MetricMapping"),
+            }
+        ),
     )
 
 

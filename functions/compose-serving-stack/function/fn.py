@@ -35,10 +35,12 @@ ahead of the Envoy Gateway release.
 """
 
 import grpc
-from crossplane.function import logging, resource, response
+from crossplane.function import logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
 from models.ai.modelplane.infrastructure.servingstack import v1alpha1
+from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
+from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 from models.io.crossplane.m.helm.providerconfig import v1beta1 as helmpcv1beta1
 from models.io.crossplane.m.helm.release import v1beta1 as helmv1beta1
 from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
@@ -48,7 +50,7 @@ from models.io.crossplane.m.kubernetes.providerconfig import (
 from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
-from function import gateway, stacks
+from function import collector, gateway, stacks
 
 # Label key every rendered Release and Object carries, valued with its
 # composed-resource key, so Usage resourceSelectors can name any
@@ -320,6 +322,7 @@ class Composer:
         rendered = self.compose_components(components)
         rendered += self.compose_gateway()
         rendered += self.compose_gateway_pki()
+        rendered += self.compose_collector()
         self.compose_component_usages(components)
         self.compose_gateway_usages()
         self.write_status()
@@ -742,6 +745,76 @@ class Composer:
             ),
         )
         rendered.append("gateway-client-auth")
+        return rendered
+
+    def compose_collector(self) -> list[str]:
+        """Compose the collector that gathers this cluster's telemetry.
+
+        Nothing until a TelemetryDestination exists. Neither collector stores
+        anything, so collecting with nowhere to export is GPU-cluster memory and
+        CPU spent on samples nobody will ever read; a fleet that has not said
+        where its telemetry goes gets none composed.
+
+        Returns the composed-resource keys it rendered, for readiness.
+        """
+        response.require_resources(
+            self.rsp,
+            name="destinations",
+            api_version="modelplane.ai/v1alpha1",
+            kind="TelemetryDestination",
+        )
+        response.require_resources(
+            self.rsp,
+            name="mappings",
+            api_version="modelplane.ai/v1alpha1",
+            kind="MetricMapping",
+        )
+        if "destinations" not in self.req.required_resources or "mappings" not in self.req.required_resources:
+            return []
+
+        destinations = list(request.get_required_resources(self.req, "destinations"))
+        if not destinations:
+            return []
+        dest = tdv1alpha1.TelemetryDestination.model_validate(destinations[0])
+        if len(destinations) > 1:
+            # Which one wins would otherwise be whichever the API server listed
+            # first, and a fleet would export somewhere nobody chose.
+            response.warning(
+                self.rsp,
+                f"{len(destinations)} TelemetryDestinations exist; using "
+                f"{_name(dest.metadata)}. Telemetry has one destination per fleet.",
+            )
+
+        statements: list[str] = list(stacks.METRIC_STATEMENTS)
+        keep_raw = False
+        for m in request.get_required_resources(self.req, "mappings"):
+            mapping = mmv1alpha1.MetricMapping.model_validate(m)
+            statements += [str(st.root) for st in mapping.spec.statements or []]
+            keep_raw = keep_raw or bool(mapping.spec.passthrough)
+
+        pc_observed = self.provider_configs_observed()
+        pc = _pc_name(self.xr)
+        rendered: list[str] = []
+        for key, manifest, cel in collector.objects(
+            cluster=_name(self.xr.metadata),
+            statements=statements,
+            exporters=dict(dest.spec.exporters or {}),
+            extensions=dict(dest.spec.extensions or {}),
+            secret_name=dest.spec.secretRef.name if dest.spec.secretRef else None,
+            keep_raw=keep_raw,
+        ):
+            if not (pc_observed or key in self.req.observed.resources):
+                continue
+            resource.update(
+                self.rsp.desired.resources[key],
+                _k8s_object(
+                    pc,
+                    manifest,
+                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
+                    ready_when=cel,
+                ),
+            )
+            rendered.append(key)
         return rendered
 
     def compose_gateway_usages(self) -> None:
