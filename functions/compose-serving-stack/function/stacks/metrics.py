@@ -124,9 +124,11 @@ BUILTIN_MAPPINGS = mappings()
 # starting the next, and a rename landing first would leave every datapoint
 # after the first unmatched and unscaled.
 #
-# DCGM counts energy in millijoules. Left to a query instead, a name ending in
-# _joules_total holding millijoules is the kind of thing nobody notices until a
-# bill.
+# DCGM reports energy in millijoules and framebuffer memory in MiB, and both
+# are renamed onto a name that states a different unit. Left to a query
+# instead, a name ending in _joules_total holding millijoules is the kind of
+# thing nobody notices until a bill.
 DATAPOINT_STATEMENTS = [
-    'set(value_double, value_double / 1000) where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"'
+    'set(value_double, value_double / 1000) where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
+    'set(value_double, value_double * 1048576) where metric.name == "DCGM_FI_DEV_FB_USED"',
 ]

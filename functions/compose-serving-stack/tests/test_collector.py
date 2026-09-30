@@ -90,6 +90,13 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(any("value_double / 1000" in st for st in blocks[0]["statements"]))
         self.assertTrue(any("modelplane_energy_joules_total" in st for st in blocks[1]["statements"]))
 
+    def test_dcgm_units_are_converted_to_the_unit_the_name_claims(self) -> None:
+        """DCGM reports mJ and MiB; the names say joules and bytes."""
+        blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
+        scales = " ".join(blocks[0]["statements"])
+        self.assertIn("DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION", scales)
+        self.assertIn("DCGM_FI_DEV_FB_USED", scales)
+
     def test_a_value_rewrite_never_lands_in_the_metric_context(self) -> None:
         """value_double is a datapoint path; the collector refuses to start on it here."""
         blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
