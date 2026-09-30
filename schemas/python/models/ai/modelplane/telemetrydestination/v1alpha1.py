@@ -61,7 +61,7 @@ class Sink(BaseModel):
     secretRef: SecretRef | None = None
     """
     A Secret holding this sink's credential. Its keys reach the collector as environment variables, for config above referring to ${env:TOKEN}, and as files under /etc/modelplane/telemetry/<sink name>/, for an authenticator reading one from disk.
-    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. A file is refreshed in place where an environment variable is fixed for the life of the process, so an authenticator reading the file picks up a rotated credential without a restart.
+    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. The files are per sink; the environment variables are not, so two Secrets sharing a key name still collide there and the file is the one to read. A file is refreshed in place where an environment variable is fixed for the life of the process, so an authenticator reading the file picks up a rotated credential without a restart.
     """
     type: constr(max_length=63)
     """

@@ -772,10 +772,19 @@ class Composer:
         if "destinations" not in self.req.required_resources or "mappings" not in self.req.required_resources:
             return []
 
-        destinations = list(request.get_required_resources(self.req, "destinations"))
+        # Sorted, not whichever the API server listed first: the collector
+        # restarts on a change to its rendered config, so an unstable choice
+        # between two destinations would redeploy it on alternate reconciles.
+        destinations = sorted(
+            (
+                tdv1alpha1.TelemetryDestination.model_validate(d)
+                for d in request.get_required_resources(self.req, "destinations")
+            ),
+            key=lambda d: _name(d.metadata),
+        )
         if not destinations:
             return []
-        dest = tdv1alpha1.TelemetryDestination.model_validate(destinations[0])
+        dest = destinations[0]
         if len(destinations) > 1:
             # Which one wins would otherwise be whichever the API server listed
             # first, and a fleet would export somewhere nobody chose.

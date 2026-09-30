@@ -30,10 +30,10 @@ Every series carries `cluster`. A series about a deployment also carries `deploy
 | `modelplane_request_queue_seconds` | How long a request waited before the engine started |
 | `modelplane_requests_waiting` | Queue depth per engine |
 | `modelplane_kv_cache_utilization_ratio` | KV-cache occupancy, averaged over replicas |
-| `modelplane_kv_cache_utilization_ratio_max` | KV-cache occupancy of the busiest replica |
-| `modelplane_tokens_total` | Tokens in and out, by `direction` |
-| `modelplane_replica_gpus` | GPUs a replica holds |
-| `modelplane_gpu_seconds_total` | GPU-time bound to serving |
+| `modelplane_request_input_tokens` | Prompt size, as a histogram |
+| `modelplane_request_output_tokens` | Generated length, as a histogram |
+| `modelplane_gpu_memory_used_bytes` | Framebuffer memory in use, per GPU |
+| `modelplane_energy_joules_total` | Energy drawn since the driver last reloaded |
 
 Latency appears twice on purpose. The `frontend_` series are what your caller experienced,
 measured at the gateway. The engine's own series are what the engine spent. When the
@@ -235,17 +235,19 @@ cluster, and every series now carries `cluster`.
 | `vllm:kv_cache_usage_perc` | `modelplane_kv_cache_utilization_ratio` |
 | `vllm:num_preemptions_total` | `modelplane_requests_preempted_total` |
 | `vllm:prefix_cache_hits_total` | `modelplane_prefix_cache_hits_total` |
-| `vllm:prompt_tokens_total` | `modelplane_tokens_total{direction="input"}` |
-| `vllm:generation_tokens_total` | `modelplane_tokens_total{direction="output"}` |
-| `vllm:request_success_total{finished_reason}` | `modelplane_responses_total{reason}` |
 | `DCGM_FI_DEV_FB_USED` | `modelplane_gpu_memory_used_bytes` |
 | `DCGM_FI_DEV_GPU_TEMP` | `modelplane_gpu_temperature_celsius` |
 | `DCGM_FI_DEV_POWER_USAGE` | `modelplane_gpu_power_watts` |
 | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | `modelplane_gpu_tensor_active_ratio` |
 | `envoy_cluster_upstream_rq_time` | `modelplane_frontend_request_duration_seconds` |
-| `envoy_cluster_upstream_rq_xx` | `modelplane_requests_total{status}` |
 
-Two have no direct replacement. `vllm:inter_token_latency_seconds` isn't renamed, because
+Some have no replacement. A rename carries one metric to one name, so the counters that
+would fold several series under one label - tokens by direction, responses by reason,
+requests by status - aren't part of this surface yet. Keep reading those from your engine
+and your gateway directly. For prompt and output size, `modelplane_request_input_tokens`
+and `modelplane_request_output_tokens` carry the same measurement as histograms.
+
+`vllm:inter_token_latency_seconds` isn't renamed, because
 SGLang publishes a metric of the same name measuring something else; use
 `modelplane_frontend_tpot_seconds`, which the gateway measures the same way for every
 engine. `DCGM_FI_DEV_GPU_UTIL` isn't renamed either, because it only tells you the card

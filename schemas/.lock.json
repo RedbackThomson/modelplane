@@ -1,6 +1,6 @@
 {
   "packages": {
-    "fs://apis": "80357e7a8407a4046262d4c3c0e13dfd4f5da938b0e1368321439319842b46bd",
+    "fs://apis": "934848f9e76217a886a84295c279bd9366c23d153c854f465e02ea1574c17d28",
     "git://https://github.com/crossplane/crossplane/cluster/crds": "90d8b72ad8b829f0bcd7d7d5a98eaa0d579f244a",
     "xpkg://xpkg.upbound.io/upbound/provider-aws-ec2:v2.6.0": "sha256:acc26c8d2710e0306185b6c626a2f8c8fe0fdf89874e85efe7944a3668322865",
     "xpkg://xpkg.upbound.io/upbound/provider-aws-efs:v2.6.0": "sha256:00f1bbbb3c0f1948b6dd45c841a083d63e41850f5a559a15580915311f404911",

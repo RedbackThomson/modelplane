@@ -14,11 +14,14 @@
 
 """Tests for the collector this stack composes."""
 
+import typing
 import unittest
 
 import yaml
 from function import collector, stacks
+from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
 from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
+from pydantic import ValidationError
 
 _EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/primary/token"}}
 
@@ -110,6 +113,21 @@ class TestConfig(unittest.TestCase):
         scales = " ".join(blocks[0]["statements"])
         self.assertIn("DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION", scales)
         self.assertIn("DCGM_FI_DEV_FB_USED", scales)
+
+    def test_every_unit_the_api_offers_has_a_conversion(self) -> None:
+        """A unit the API accepts with no conversion here is a KeyError at render time."""
+        annotation = mmv1alpha1.Metric.model_fields["fromUnit"].annotation
+        literal = next(a for a in typing.get_args(annotation) if typing.get_origin(a) is typing.Literal)
+        self.assertEqual(set(typing.get_args(literal)), set(collector._UNIT_CONVERSION))
+
+    def test_a_metric_name_cannot_end_the_comparison_early(self) -> None:
+        """A quote in `from` would rename whatever the rest of the line matched."""
+        with self.assertRaises(ValidationError):
+            mmv1alpha1.Metric.model_validate({"from": 'x" or true or name == "y', "to": "modelplane_x"})
+        for mapping in stacks.BUILTIN_MAPPINGS:
+            for m in mapping.spec.metrics:
+                round_tripped = mmv1alpha1.Metric.model_validate({"from": m.from_, "to": m.to})
+                self.assertEqual(round_tripped.from_, m.from_)
 
     def test_a_value_rewrite_never_lands_in_the_metric_context(self) -> None:
         """value_double is a datapoint path; the collector refuses to start on it here."""

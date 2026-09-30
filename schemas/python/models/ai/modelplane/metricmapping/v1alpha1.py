@@ -43,9 +43,12 @@ class Crossplane(BaseModel):
 
 
 class Metric(BaseModel):
-    from_: constr(max_length=255) = Field(..., alias='from')
+    from_: constr(pattern=r'^[a-zA-Z_:][a-zA-Z0-9_:]*$', max_length=255) = Field(
+        ..., alias='from'
+    )
     """
     The metric's name as the component emits it, matched exactly. Nothing here declares which engine a deployment runs: a name that no component emits simply matches nothing.
+    Held to the characters a metric name can contain. The name is matched inside the collector's own query language, so a quote here would end the comparison early and rename whatever the rest of the line matched.
     """
     fromUnit: (
         Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds'] | None

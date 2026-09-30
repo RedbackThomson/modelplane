@@ -58,11 +58,18 @@ spec:
                     from:
                       type: string
                       maxLength: 255
+                      pattern: '^[a-zA-Z_:][a-zA-Z0-9_:]*$'
                       description: >-
                         The metric's name as the component emits it, matched
                         exactly. Nothing here declares which engine a
                         deployment runs: a name that no component emits simply
                         matches nothing.
+
+                        Held to the characters a metric name can contain. The
+                        name is matched inside the collector's own query
+                        language, so a quote here would end the comparison
+                        early and rename whatever the rest of the line
+                        matched.
                     to:
                       type: string
                       maxLength: 255
