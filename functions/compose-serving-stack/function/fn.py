@@ -269,6 +269,22 @@ def _ensure_trailing_newline(cert: str) -> str:
     return cert if cert.endswith("\n") else cert + "\n"
 
 
+# The label Crossplane stamps on a composed resource, naming the composite that
+# claimed it. A ServingStack's own name is generated and carries a suffix, so
+# this is what an operator calls the cluster.
+_LABEL_COMPOSITE = "crossplane.io/composite"
+
+
+def _cluster_name(xr: v1alpha1.ServingStack) -> str:
+    """The InferenceCluster this stack serves, as its operator named it.
+
+    Every series the collector exports is stamped with this, and a metric
+    labelled with a generated name matches nothing an operator would query for.
+    """
+    labels = (xr.metadata.labels if xr.metadata else None) or {}
+    return labels.get(_LABEL_COMPOSITE) or _name(xr.metadata)
+
+
 def _pc_name(xr: v1alpha1.ServingStack) -> str:
     """Derive the ProviderConfig name from the XR."""
     return resource.child_name(_name(xr.metadata), "cluster")
@@ -805,7 +821,7 @@ class Composer:
         pc = _pc_name(self.xr)
         rendered: list[str] = []
         for key, manifest, cel in collector.objects(
-            cluster=_name(self.xr.metadata),
+            cluster=_cluster_name(self.xr),
             mappings=mappings,
             sinks=list(dest.spec.sinks),
             extensions=dict(dest.spec.extensions or {}),

@@ -106,7 +106,7 @@ class GroveBackend:
             if security_context:
                 c["securityContext"] = security_context
             if serving:
-                c["ports"] = [{"containerPort": base.ENGINE_PORT}]
+                c["ports"] = [{"name": base.ENGINE_PORT_NAME, "containerPort": base.ENGINE_PORT}]
                 c["readinessProbe"] = {
                     "httpGet": {"path": "/health", "port": base.ENGINE_PORT},
                     "initialDelaySeconds": 30,

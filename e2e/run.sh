@@ -494,3 +494,62 @@ log "verify (usage record): ${usage}"
 
 cleanup_verify_pods
 log "End to end OK: ${base} authenticates callers, serves ${model} over OpenAI and Anthropic, rewrites the model, and meters it"
+
+# Telemetry. The TelemetryDestination went in with the rest of the manifests, so
+# the collector composed while the model rolled out and there's nothing to wait
+# for beyond the first scrape. Its debug sink prints what reached it to its own
+# log, which is the whole path in one assertion: discovery found the engine by
+# the labels compose-model-replica stamps, the built-in mappings renamed its
+# series, the unit conversion ran, and the identity came off the pod.
+log "Verifying the fleet's telemetry"
+kubectl --context "$WLCTX" -n modelplane-system rollout status deploy/modelplane-collector --timeout=180s || {
+	echo "verify: the collector never rolled out on the workload cluster" >&2
+	kubectl --context "$WLCTX" -n modelplane-system describe deploy/modelplane-collector >&2 || true
+	exit 1
+}
+
+# One log read per attempt, not one per assertion. The window is generous
+# because the collector's config arrives by reconcile: on a fresh install it can
+# roll out once against the destination and again once the MetricMappings land,
+# and the restart the config change triggers starts its log over. In steady
+# state the first read already has everything.
+telemetry=""
+for _ in $(seq 1 30); do
+	telemetry="$(kubectl --context "$WLCTX" -n modelplane-system logs deploy/modelplane-collector --tail=4000 2>/dev/null || true)"
+	case "$telemetry" in *modelplane_gpu_memory_used_bytes*) break ;; esac
+	sleep 10
+done
+
+missing=""
+for want in \
+	'Name: modelplane_requests_waiting' \
+	'Name: modelplane_gpu_memory_used_bytes' \
+	'deployment: Str(mock-demo)' \
+	'engine: Str(mock)' \
+	'role: Str(Standalone)' \
+	'cluster: Str(local)'; do
+	case "$telemetry" in
+	*"$want"*) ;;
+	*) missing="$missing [$want]" ;;
+	esac
+done
+
+# 1024 MiB as bytes. DCGM reports the framebuffer in MiB and the name says
+# bytes, so a mapping that forgot the unit reads 1024 here instead.
+case "$telemetry" in
+*"Value: 1073741824"*) ;;
+*) missing="$missing [DCGM_FI_DEV_FB_USED converted from MiB to bytes]" ;;
+esac
+
+# Nothing the mappings didn't rename leaves a cluster, so the engine's own
+# names must not appear downstream.
+case "$telemetry" in
+*"Name: vllm:num_requests_waiting"*) missing="$missing [vllm: names should not leave the cluster]" ;;
+esac
+
+[ -z "$missing" ] || {
+	echo "verify: telemetry missing:$missing" >&2
+	echo "$telemetry" | grep -E "Name: |-> (cluster|deployment|engine|role): |Value: " | tail -40 >&2 || true
+	exit 1
+}
+log "Telemetry OK: the engine's series arrive renamed, converted, and attributed to its deployment"

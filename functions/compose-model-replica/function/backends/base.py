@@ -228,6 +228,11 @@ def remote_namespace(replica: v1alpha1.ModelReplica) -> str:
 # the ModelEndpoint URLs, so it must not diverge between backends.
 ENGINE_PORT = 8000
 
+# The name given to that port. Named because the collector's engine scrape job
+# selects on it: matching by number instead would find the pd-sidecar's port on
+# a disaggregated pod rather than the engine behind it.
+ENGINE_PORT_NAME = "http"
+
 # Pod label carrying the serving identity (the replica name). The replica's one
 # shared Service selects on it, so every engine's serving pods carry it - a
 # Standalone pod, or a gang's leader (a LeaderWorkerSet leader or a Grove leader

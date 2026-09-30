@@ -217,7 +217,7 @@ _NATIVE_WANT = {
                             "name": "engine",
                             "image": "vllm/vllm-openai:latest",
                             "args": ["--model=Qwen/Qwen3-0.6B"],
-                            "ports": [{"containerPort": 8000}],
+                            "ports": [{"name": "http", "containerPort": 8000}],
                             "resources": {"claims": [{"name": "devices"}]},
                             "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}],
                             "readinessProbe": {
@@ -346,7 +346,7 @@ def _engine(
     if env is not None:
         c["env"] = env
     if serving:
-        c["ports"] = [{"containerPort": 8000}]
+        c["ports"] = [{"name": "http", "containerPort": 8000}]
         c["readinessProbe"] = {
             "httpGet": {"path": "/health", "port": 8000},
             "initialDelaySeconds": 30,

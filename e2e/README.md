@@ -47,8 +47,27 @@ server exposes both, so the pod goes Ready without a real model or GPU.
 | `ModelDeployment` → `ModelReplica` → `ModelEndpoint` → `ModelService` wiring | Real GPU drivers / CUDA (fake DRA devices only) |
 | DRA `ResourceClaim` → fake device binding (the real allocation path) | Multi-node / disaggregated (`PrefillDecode`) serving |
 | Serving-stack install on a real (BYO) workload cluster | Cloud provisioning (EKS/GKE/Nebius) |
-| `InferenceGateway` + cross-cluster routing to the replica | |
+| `InferenceGateway` + cross-cluster routing to the replica | Export to a real metrics backend (debug sink only) |
 | Status propagation and foreground-deletion ordering | |
+| Telemetry: collector composed, engine discovered, series renamed and attributed | |
+
+### Telemetry
+
+`60-telemetry.yaml` creates a `TelemetryDestination` with the collector's
+**debug** exporter, which prints what reached it to the collector's own log. So
+the whole path is assertable with `kubectl logs` and needs no metrics backend:
+service discovery finds the engine by the labels `compose-model-replica` stamps
+on serving pods, the built-in `MetricMapping`s rename its series, the unit
+conversion runs, and the identity comes off the pod.
+
+The mock engine serves `/metrics` with two real names — `vllm:num_requests_waiting`
+and `DCGM_FI_DEV_FB_USED` — so `--verify` asserts they arrive as
+`modelplane_requests_waiting` and `modelplane_gpu_memory_used_bytes`, that 1024
+MiB became 1073741824 bytes, that each carries its deployment, engine, role and
+cluster, and that the engine's own `vllm:` names did *not* leave the cluster.
+
+It costs no extra wait: the destination is applied with every other manifest, so
+the collector composes while the model is still rolling out.
 
 ### Why cloud provisioning cannot be tested here
 

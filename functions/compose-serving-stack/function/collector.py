@@ -38,12 +38,17 @@ _CREDENTIALS_DIR = "/etc/modelplane/telemetry"
 
 IMAGE = "otel/opentelemetry-collector-contrib:0.161.0"
 
-# The label Modelplane stamps on every serving pod, and the port name it gives
-# the engine's metrics. Both matter: an engine container's port is unnamed by
-# default, and matching by number would find the pd-sidecar on a disaggregated
-# pod rather than the engine behind it.
-_SERVING_LABEL = "modelplane_ai_serving"
+# Pod labels as Kubernetes service discovery spells them: modelplane.ai/x
+# arrives as __meta_kubernetes_pod_label_modelplane_ai_x.
+#
+# On every serving pod, workers included. The engines job selects on it and the
+# substrate job drops on it, so the two partition the same set rather than
+# leaving a worker to be collected by both.
 _DEPLOYMENT_LABEL = "modelplane_ai_deployment"
+
+# The name compose-model-replica gives the engine's port. Selecting by name
+# rather than number is what keeps this off the pd-sidecar's port on a
+# disaggregated pod, which would answer and serve the wrong thing.
 _METRICS_PORT = "http"
 
 _SCRAPE_INTERVAL = "15s"
@@ -169,9 +174,9 @@ def _scrape_configs() -> list[dict[str, Any]]:
                     "regex": ".+",
                 },
                 {
-                    "source_labels": [f"__meta_kubernetes_pod_label_{_SERVING_LABEL}"],
+                    "source_labels": [f"__meta_kubernetes_pod_label_{_DEPLOYMENT_LABEL}"],
                     "action": "drop",
-                    "regex": "true",
+                    "regex": ".+",
                 },
                 # The rest of the same convention, not just the first line of
                 # it. A pod that says scrape me generally also says where: the

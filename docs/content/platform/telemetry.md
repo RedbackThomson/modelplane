@@ -163,11 +163,12 @@ export to Prometheus and write recording rules there.
 
 ## Engines
 
-vLLM and SGLang need no configuration.
+Modelplane renames vLLM's and SGLang's own metrics for you, so neither needs a mapping.
+SGLang needs one flag to publish them at all, below.
 
-Any other OpenAI-compatible engine reports its top-line numbers with no configuration
-either. The gateway measures those, not the engine, so `modelplane_frontend_*` and the token
-counters work for an engine Modelplane has never seen.
+Any other OpenAI-compatible engine reports its top-line numbers with no configuration. The
+gateway measures those, not the engine, so `modelplane_frontend_*` works for an engine
+Modelplane has never seen.
 
 To normalize that engine's own metrics as well, create a `MetricMapping`:
 
@@ -197,8 +198,8 @@ Rename only where the measurements agree. Two engines' histograms under one name
 less than nothing if their buckets disagree, because a quantile over them is wrong rather
 than approximate.
 
-One engine needs a flag. SGLang publishes `/metrics` only when it runs with
-`--enable-metrics`, so add it to the engine args. vLLM needs nothing.
+SGLang publishes `/metrics` only when it runs with `--enable-metrics`, so add that to its
+engine args. vLLM needs nothing.
 
 ## Why engine latency and gateway latency differ
 
@@ -270,20 +271,19 @@ engine. `DCGM_FI_DEV_GPU_UTIL` isn't renamed either, because it only tells you t
 wasn't idle; use `modelplane_gpu_compute_active_ratio` and
 `modelplane_gpu_tensor_active_ratio`.
 
-You can also skip the rewrite for now. Modelplane provides compatibility recording rules
-that rebuild the old names from the new ones, so your existing dashboards keep working
-untouched:
+You can also defer the rewrite. A recording rule rebuilds an old name from a new one, so a
+dashboard keeps working untouched while you migrate it:
 
 ```yaml
 - record: vllm:time_to_first_token_seconds_bucket
   expr: label_replace(modelplane_request_ttft_seconds_bucket,
-          "model_name", "$1", "model", "(.*)")
+          "model_name", "$1", "deployment", "(.*)")
 ```
 
-Load it into the Prometheus you already run and nothing on a dashboard changes. It's one
+Load that into the Prometheus you already run and nothing on the dashboard changes. It's one
 rule evaluation per metric over series your backend already holds, so it costs far less than
-collecting everything twice. It covers the names in the table above, and it's meant to be
-deleted once your panels use the new ones.
+collecting everything twice. Write one per name in the table above, and delete them once the
+panels use the new names.
 
 A series no statement renames doesn't leave the cluster. If a panel needs an engine's
 own name, write a `MetricMapping` that renames it onto the `modelplane_*` surface: a

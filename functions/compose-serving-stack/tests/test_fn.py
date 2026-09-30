@@ -93,6 +93,28 @@ def _crds(filename: str) -> list[dict]:
     ]
 
 
+class TestClusterName(unittest.TestCase):
+    """The name every exported series is stamped with."""
+
+    def _stack(self, labels: dict[str, str] | None) -> v1alpha1.ServingStack:
+        return v1alpha1.ServingStack(
+            metadata=metav1.ObjectMeta(name="local-serving-stack-d4206", labels=labels),
+            spec=v1alpha1.Spec(
+                cloud="Existing",
+                secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
+                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+            ),
+        )
+
+    def test_it_is_the_composite_an_operator_named(self) -> None:
+        """A ServingStack's own name is generated and carries a suffix."""
+        self.assertEqual(fn._cluster_name(self._stack({"crossplane.io/composite": "local"})), "local")
+
+    def test_it_falls_back_to_the_stack(self) -> None:
+        """Better a generated name on the series than none at all."""
+        self.assertEqual(fn._cluster_name(self._stack(None)), "local-serving-stack-d4206")
+
+
 def _request(cloud: str, stack: str, observed: dict | None = None) -> fnv1.RunFunctionRequest:
     """Build a RunFunctionRequest for a test-backend ServingStack."""
     return fnv1.RunFunctionRequest(
