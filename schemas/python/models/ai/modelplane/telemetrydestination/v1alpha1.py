@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, constr
+from pydantic import AwareDatetime, BaseModel, Field, constr
 
 from ....io.k8s.apimachinery.pkg.apis.meta import v1
 
@@ -49,23 +49,39 @@ class SecretRef(BaseModel):
     """
 
 
+class Sink(BaseModel):
+    config: dict[str, Any]
+    """
+    That exporter's own configuration, passed through unread. Modelplane does not model what an exporter is, so TLS, retry, queue and compression settings all work, and a sink keeps working when the collector gains a setting Modelplane has never heard of.
+    """
+    name: constr(pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', max_length=63)
+    """
+    This sink's name, unique within the destination. It names the collector's exporter instance and the directory its credential mounts at, so renaming one restarts the collector.
+    """
+    secretRef: SecretRef | None = None
+    """
+    A Secret holding this sink's credential. Its keys reach the collector as environment variables, for config above referring to ${env:TOKEN}, and as files under /etc/modelplane/telemetry/<sink name>/, for an authenticator reading one from disk.
+    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. A file is refreshed in place where an environment variable is fixed for the life of the process, so an authenticator reading the file picks up a rotated credential without a restart.
+    """
+    type: constr(max_length=63)
+    """
+    The collector exporter to send with, by the name OpenTelemetry gives it: otlphttp, otlp, prometheusremotewrite, kafka, and every other one the collector provides.
+    Not an enum, because enumerating them here would mean a Modelplane release for each exporter the collector gains, and the collector already refuses to start on a name it doesn't have.
+    """
+
+
 class Spec(BaseModel):
     crossplane: Crossplane | None = None
     """
     Configures how Crossplane will reconcile this composite resource
     """
-    exporters: dict[str, Any]
-    """
-    The OpenTelemetry collector's exporters block, passed through unread. Modelplane validates that it parses and reports whether the destination accepts writes; it does not model what an exporter is.
-    So any exporter the collector provides works, with its TLS, retry and queue settings intact, and a destination keeps working when the collector gains an exporter Modelplane has never heard of.
-    """
     extensions: dict[str, Any] | None = None
     """
-    The collector's extensions block, passed through unread, for the authenticator an exporter references. Bearer token, basic auth, OIDC and SigV4 all work, because none of them is modelled here.
+    The collector's extensions block, passed through unread, for the authenticator a sink references. Bearer token, basic auth, OIDC and SigV4 all work, because none of them is modelled here.
     """
-    secretRef: SecretRef | None = None
+    sinks: list[Sink] = Field(..., max_length=16, min_length=1)
     """
-    A Secret whose keys Modelplane mounts into the collector as environment variables, so configuration above refers to ${env:TOKEN} and the credential itself never appears in this object or in kubectl output.
+    Where to send it. Every sink gets the whole stream, so two sinks is two copies of the fleet's metrics, billed twice.
     """
 
 

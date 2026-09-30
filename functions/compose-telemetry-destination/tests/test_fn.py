@@ -47,9 +47,16 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
 
     async def test_compose(self) -> None:
         """The function reports whether a destination can actually be sent through."""
-        exporters = {
-            "otlphttp": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}}
-        }
+
+        def sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> dict:
+            return {
+                "name": name,
+                "type": type_,
+                "config": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}},
+                **({"secretRef": {"name": secret}} if secret else {}),
+            }
+
+        sinks = [sink()]
         extensions = {"bearertokenauth": {"token": "${env:OTLP_TOKEN}"}}
 
         def xr(spec: dict) -> dict:
@@ -65,7 +72,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 observed=fnv1.State(composite=fnv1.Resource(resource=resource.dict_to_struct(xr(spec)))),
             )
             if secrets is not None:
-                r.required_resources["secret"].items.extend([fnv1.Resource(resource=s) for s in secrets])
+                r.required_resources["secret-primary"].items.extend([fnv1.Resource(resource=s) for s in secrets])
             return r
 
         def want(
@@ -81,15 +88,15 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 context=structpb.Struct(),
             )
             if secret is not None:
-                rsp.requirements.resources["secret"].api_version = "v1"
-                rsp.requirements.resources["secret"].kind = "Secret"
-                rsp.requirements.resources["secret"].match_name = secret
+                rsp.requirements.resources["secret-primary"].api_version = "v1"
+                rsp.requirements.resources["secret-primary"].kind = "Secret"
+                rsp.requirements.resources["secret-primary"].match_name = secret
             return rsp
 
         cases = [
             Case(
-                name="ready, naming the exporters it sends through",
-                req=req({"exporters": exporters, "extensions": extensions}),
+                name="ready, naming the sinks it sends through",
+                req=req({"sinks": sinks, "extensions": extensions}),
                 want=want(
                     fnv1.READY_TRUE,
                     {"status": {}},
@@ -97,14 +104,22 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_TRUE,
                         reason="Available",
-                        message="Exporting through otlphttp",
+                        message="Exporting through otlphttp/primary",
                     ),
                 ),
             ),
             Case(
                 name="ready with an exporter that references no authenticator at all",
                 req=req(
-                    {"exporters": {"prometheusremotewrite": {"endpoint": "https://prom.acme.example/api/v1/write"}}}
+                    {
+                        "sinks": [
+                            {
+                                "name": "prom",
+                                "type": "prometheusremotewrite",
+                                "config": {"endpoint": "https://prom.acme.example/api/v1/write"},
+                            }
+                        ]
+                    }
                 ),
                 want=want(
                     fnv1.READY_TRUE,
@@ -113,14 +128,14 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_TRUE,
                         reason="Available",
-                        message="Exporting through prometheusremotewrite",
+                        message="Exporting through prometheusremotewrite/prom",
                     ),
                 ),
             ),
             Case(
                 name="ready once the credential Secret exists",
                 req=req(
-                    {"exporters": exporters, "extensions": extensions, "secretRef": {"name": "telemetry-credentials"}},
+                    {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
                     secrets=[
                         resource.dict_to_struct(
                             {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
@@ -134,7 +149,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_TRUE,
                         reason="Available",
-                        message="Exporting through otlphttp",
+                        message="Exporting through otlphttp/primary",
                     ),
                     secret="telemetry-credentials",
                 ),
@@ -142,7 +157,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             Case(
                 name="waits for the credential Secret to resolve",
                 req=req(
-                    {"exporters": exporters, "extensions": extensions, "secretRef": {"name": "telemetry-credentials"}},
+                    {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
                 ),
                 want=want(
                     fnv1.READY_FALSE,
@@ -157,8 +172,8 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             Case(
-                name="not ready when an exporter names an authenticator nothing defines",
-                req=req({"exporters": exporters}),
+                name="not ready when a sink names an authenticator nothing defines",
+                req=req({"sinks": sinks}),
                 want=want(
                     fnv1.READY_FALSE,
                     None,
@@ -171,37 +186,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             Case(
-                name="an exporter that is not a mapping is left to the collector to reject",
-                req=req({"exporters": {"otlphttp": "https://otel.acme.example"}}),
-                want=want(
-                    fnv1.READY_TRUE,
-                    {"status": {}},
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_TRUE,
-                        reason="Available",
-                        message="Exporting through otlphttp",
-                    ),
-                ),
-            ),
-            Case(
-                name="not ready with no exporters at all",
-                req=req({"exporters": {}}),
-                want=want(
-                    fnv1.READY_FALSE,
-                    None,
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_FALSE,
-                        reason="NoExporters",
-                        message="No exporters, so collected telemetry has nowhere to go",
-                    ),
-                ),
-            ),
-            Case(
                 name="not ready when the credential Secret is missing",
                 req=req(
-                    {"exporters": exporters, "extensions": extensions, "secretRef": {"name": "telemetry-credentials"}},
+                    {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
                     secrets=[],
                 ),
                 want=want(
@@ -213,7 +200,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         reason="SecretNotFound",
                         message=(
                             "Secret telemetry-credentials does not exist, "
-                            "so the collector has no credential to send with"
+                            "so sink primary has no credential to send with"
                         ),
                     ),
                     secret="telemetry-credentials",

@@ -52,7 +52,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             "kind": "MetricMapping",
             "metadata": {"name": "my-engine"},
             "spec": {
-                "statements": ['set(name, "modelplane_requests_waiting") where name == "my_engine_queued"'],
+                "metrics": [{"from": "my_engine_queued", "to": "modelplane_requests_waiting"}],
             },
         }
         cluster = resource.dict_to_struct(
@@ -83,11 +83,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        no_statements = {**mapping, "spec": {}}
-
         cases = [
             Case(
-                name="ready, and says how many clusters took the statements",
+                name="ready, and says how many clusters took the renames",
                 req=req(mapping, [cluster, cluster]),
                 want=want(
                     fnv1.READY_TRUE,
@@ -96,7 +94,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_TRUE,
                         reason="Available",
-                        message="Rendered into 2 inference cluster(s)",
+                        message="Renaming 1 metric(s) on 2 inference cluster(s)",
                     ),
                 ),
             ),
@@ -110,21 +108,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_FALSE,
                         reason="NoClusters",
-                        message="No inference cluster to render these statements into",
-                    ),
-                ),
-            ),
-            Case(
-                name="not ready when the mapping would change nothing",
-                req=req(no_statements, [cluster]),
-                want=want(
-                    fnv1.READY_FALSE,
-                    {"status": {"clusters": 1}},
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_FALSE,
-                        reason="NoStatements",
-                        message="No statements, so this mapping changes nothing",
+                        message="No inference cluster to render these renames into",
                     ),
                 ),
             ),

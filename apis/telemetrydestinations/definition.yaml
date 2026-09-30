@@ -25,7 +25,7 @@ spec:
         properties:
           spec:
             type: object
-            required: [exporters]
+            required: [sinks]
             description: >-
               Where the fleet's telemetry goes. Modelplane composes no
               collectors until a TelemetryDestination exists: neither tier
@@ -36,40 +36,80 @@ spec:
               There is no per-deployment opt-out. A ModelDeployment's author
               owns neither the destination nor its bill.
             properties:
-              exporters:
-                type: object
-                x-kubernetes-preserve-unknown-fields: true
+              sinks:
+                type: array
+                minItems: 1
+                maxItems: 16
                 description: >-
-                  The OpenTelemetry collector's exporters block, passed
-                  through unread. Modelplane validates that it parses and
-                  reports whether the destination accepts writes; it does not
-                  model what an exporter is.
+                  Where to send it. Every sink gets the whole stream, so two
+                  sinks is two copies of the fleet's metrics, billed twice.
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [name]
+                items:
+                  type: object
+                  required: [name, type, config]
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 63
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                      description: >-
+                        This sink's name, unique within the destination. It
+                        names the collector's exporter instance and the
+                        directory its credential mounts at, so renaming one
+                        restarts the collector.
+                    type:
+                      type: string
+                      maxLength: 63
+                      description: >-
+                        The collector exporter to send with, by the name
+                        OpenTelemetry gives it: otlphttp, otlp,
+                        prometheusremotewrite, kafka, and every other one the
+                        collector provides.
 
-                  So any exporter the collector provides works, with its TLS,
-                  retry and queue settings intact, and a destination keeps
-                  working when the collector gains an exporter Modelplane has
-                  never heard of.
+                        Not an enum, because enumerating them here would mean
+                        a Modelplane release for each exporter the collector
+                        gains, and the collector already refuses to start on a
+                        name it doesn't have.
+                    config:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      description: >-
+                        That exporter's own configuration, passed through
+                        unread. Modelplane does not model what an exporter is,
+                        so TLS, retry, queue and compression settings all
+                        work, and a sink keeps working when the collector
+                        gains a setting Modelplane has never heard of.
+                    secretRef:
+                      type: object
+                      required: [name]
+                      description: >-
+                        A Secret holding this sink's credential. Its keys
+                        reach the collector as environment variables, for
+                        config above referring to ${env:TOKEN}, and as files
+                        under /etc/modelplane/telemetry/<sink name>/, for an
+                        authenticator reading one from disk.
+
+                        Per sink rather than per destination, so two sinks
+                        with different credentials don't have to share one
+                        Secret and tell their keys apart by prefix. A file is
+                        refreshed in place where an environment variable is
+                        fixed for the life of the process, so an authenticator
+                        reading the file picks up a rotated credential without
+                        a restart.
+                      properties:
+                        name:
+                          type: string
+                          maxLength: 253
+                          description: Name of the Secret, in Modelplane's namespace.
               extensions:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
                 description: >-
                   The collector's extensions block, passed through unread,
-                  for the authenticator an exporter references. Bearer token,
+                  for the authenticator a sink references. Bearer token,
                   basic auth, OIDC and SigV4 all work, because none of them
                   is modelled here.
-              secretRef:
-                type: object
-                required: [name]
-                description: >-
-                  A Secret whose keys Modelplane mounts into the collector as
-                  environment variables, so configuration above refers to
-                  ${env:TOKEN} and the credential itself never appears in this
-                  object or in kubectl output.
-                properties:
-                  name:
-                    type: string
-                    maxLength: 253
-                    description: Name of the Secret, in Modelplane's namespace.
           status:
             type: object
             properties:

@@ -791,17 +791,15 @@ class Composer:
         mappings += [
             mmv1alpha1.MetricMapping.model_validate(m) for m in request.get_required_resources(self.req, "mappings")
         ]
-        statements: list[str] = [str(st.root) for mp in mappings for st in mp.spec.statements or []]
 
         pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
         rendered: list[str] = []
         for key, manifest, cel in collector.objects(
             cluster=_name(self.xr.metadata),
-            statements=statements,
-            exporters=dict(dest.spec.exporters or {}),
+            mappings=mappings,
+            sinks=list(dest.spec.sinks),
             extensions=dict(dest.spec.extensions or {}),
-            secret_name=dest.spec.secretRef.name if dest.spec.secretRef else None,
         ):
             if not (pc_observed or key in self.req.observed.resources):
                 continue

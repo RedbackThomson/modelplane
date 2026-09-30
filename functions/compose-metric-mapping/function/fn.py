@@ -14,10 +14,9 @@
 
 """Compose a MetricMapping.
 
-A MetricMapping carries OTTL statements that the collector on every
-inference cluster renders into its transform processor. Modelplane does not
-interpret them: what an operator writes here is the collector's own
-configuration language.
+A MetricMapping names the metrics one component emits and what Modelplane
+calls them. compose-serving-stack compiles every mapping into the transform
+processor of the collector on each inference cluster.
 
 This function composes nothing. The collector is composed by
 compose-serving-stack, which reads every MetricMapping. What this function
@@ -35,7 +34,6 @@ CONDITION_TYPE_ACCEPTED = "Accepted"
 CONDITION_REASON_AVAILABLE = "Available"
 CONDITION_REASON_WAITING_FOR_CLUSTERS = "WaitingForClusters"
 CONDITION_REASON_NO_CLUSTERS = "NoClusters"
-CONDITION_REASON_NO_STATEMENTS = "NoStatements"
 
 
 class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
@@ -56,7 +54,7 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         xr = v1alpha1.MetricMapping(**resource.struct_to_dict(req.observed.composite.resource))
 
         # Every inference cluster renders every mapping, so the count of
-        # clusters is the count that took these statements.
+        # clusters is the count that took these renames.
         response.require_resources(
             rsp,
             name="clusters",
@@ -70,12 +68,8 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         clusters = len(list(request.get_required_resources(req, "clusters")))
         resource.update_status(rsp.desired.composite, v1alpha1.Status(clusters=clusters))
 
-        if not xr.spec.statements:
-            _not_ready(rsp, CONDITION_REASON_NO_STATEMENTS, "No statements, so this mapping changes nothing")
-            return rsp
-
         if clusters == 0:
-            _not_ready(rsp, CONDITION_REASON_NO_CLUSTERS, "No inference cluster to render these statements into")
+            _not_ready(rsp, CONDITION_REASON_NO_CLUSTERS, "No inference cluster to render these renames into")
             return rsp
 
         response.set_conditions(
@@ -84,7 +78,7 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
                 typ=CONDITION_TYPE_ACCEPTED,
                 status="True",
                 reason=CONDITION_REASON_AVAILABLE,
-                message=f"Rendered into {clusters} inference cluster(s)",
+                message=f"Renaming {len(xr.spec.metrics)} metric(s) on {clusters} inference cluster(s)",
             ),
         )
         rsp.desired.composite.ready = fnv1.READY_TRUE

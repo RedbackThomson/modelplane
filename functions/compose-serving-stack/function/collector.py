@@ -29,8 +29,8 @@ import hashlib
 from typing import Any
 
 import yaml
-
-from function.stacks import metrics as stacks_metrics
+from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
+from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 
 NAMESPACE = "modelplane-system"
 NAME = "modelplane-collector"
@@ -115,39 +115,79 @@ def _scrape_configs() -> list[dict[str, Any]]:
     ]
 
 
-def _transform(statements: list[str]) -> dict[str, Any]:
-    """Value rewrites first, then every rename.
+# What each source unit is worth in the base unit the target name claims.
+# Written as the expression rather than a factor so nothing has to render a
+# float: 1e-09 is not an OTTL literal.
+_UNIT_CONVERSION = {
+    "Millijoules": "value_double / 1000",
+    "Milliseconds": "value_double / 1000",
+    "Nanoseconds": "value_double / 1000000000",
+    "Mebibytes": "value_double * 1048576",
+}
+
+
+def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], list[str]]:
+    """Compile the mappings to OTTL, as (datapoint, metric) statements.
+
+    OTTL is rendered here rather than written in a MetricMapping so the kind
+    stays a description of what a component emits, and the collector's own
+    configuration language stays Modelplane's problem. It is also the only
+    place that knows a unit conversion has to run somewhere a rename cannot.
+    """
+    datapoint: list[str] = []
+    metric: list[str] = []
+    for mapping in mappings:
+        for m in mapping.spec.metrics:
+            if m.fromUnit:
+                conversion = _UNIT_CONVERSION[m.fromUnit]
+                datapoint.append(f'set(value_double, {conversion}) where metric.name == "{m.from_}"')
+            metric.append(f'set(name, "{m.to}") where name == "{m.from_}"')
+    return datapoint, metric
+
+
+def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
+    """Unit conversions first, then every rename.
 
     Two blocks rather than one list: a statement reaching a datapoint's value
     can't run in the metric context, and the processor finishes a block over
     every datapoint before it starts the next, which is what keeps a rename
-    from stranding the datapoints a value rewrite hasn't reached yet.
+    from stranding the datapoints a conversion hasn't reached yet.
     """
-    return {
-        "metric_statements": [
-            {"context": "datapoint", "statements": list(stacks_metrics.DATAPOINT_STATEMENTS)},
-            {"context": "metric", "statements": statements},
-        ]
-    }
+    datapoint, metric = statements(mappings)
+    blocks = [{"context": "metric", "statements": metric}]
+    if datapoint:
+        blocks.insert(0, {"context": "datapoint", "statements": datapoint})
+    return {"metric_statements": blocks}
+
+
+def exporters(sinks: list[tdv1alpha1.Sink]) -> dict[str, Any]:
+    """The sinks as the collector's exporters block.
+
+    A sink renders under `<type>/<name>`, which is how the collector names a
+    second instance of one component, so two sinks of the same type don't
+    collide.
+    """
+    return {f"{sink.type}/{sink.name}": dict(sink.config) for sink in sinks}
 
 
 def config(
     cluster: str,
-    statements: list[str],
-    exporters: dict[str, Any],
+    mappings: list[mmv1alpha1.MetricMapping],
+    sinks: list[tdv1alpha1.Sink],
     extensions: dict[str, Any],
 ) -> str:
     """The collector's configuration, as YAML.
 
-    Only modelplane_* leaves the cluster: a series the statements did not rename
-    is one whose meaning Modelplane cannot vouch for across engines, and it
-    costs the same to carry as one that was renamed.
+    Only modelplane_* leaves the cluster: a series no mapping renamed is one
+    whose meaning Modelplane cannot vouch for across engines, and it costs the
+    same to carry as one that was renamed.
     """
+    sink_exporters = exporters(sinks)
     processors: dict[str, Any] = {
         # cluster is stamped here rather than downstream: one receiver on the
         # control plane sees a merged stream and cannot tell senders apart.
         "resource/cluster": {"attributes": [{"key": "cluster", "value": cluster, "action": "upsert"}]},
-        "transform/modelplane": _transform(statements),
+        "transform/modelplane": _transform(mappings),
         # A pod's identity is a resource attribute, where a metric processor
         # cannot reach it. Strip and merge the resources first, or the
         # aggregation below combines nothing.
@@ -164,12 +204,18 @@ def config(
     ]
 
     service: dict[str, Any] = {
-        "pipelines": {"metrics": {"receivers": ["prometheus"], "processors": pipeline, "exporters": sorted(exporters)}},
+        "pipelines": {
+            "metrics": {
+                "receivers": ["prometheus"],
+                "processors": pipeline,
+                "exporters": sorted(sink_exporters),
+            }
+        },
     }
     cfg: dict[str, Any] = {
         "receivers": {"prometheus": {"config": {"scrape_configs": _scrape_configs()}}},
         "processors": processors,
-        "exporters": exporters,
+        "exporters": sink_exporters,
         "service": service,
     }
     if extensions:
@@ -187,10 +233,9 @@ def _digest(rendered: str) -> str:
 
 def objects(
     cluster: str,
-    statements: list[str],
-    exporters: dict[str, Any],
+    mappings: list[mmv1alpha1.MetricMapping],
+    sinks: list[tdv1alpha1.Sink],
     extensions: dict[str, Any],
-    secret_name: str | None,
 ) -> list[tuple[str, dict[str, Any], str | None]]:
     """The collector as (key, manifest, readiness CEL) triples.
 
@@ -204,18 +249,22 @@ def objects(
     permissions on clusters running no collector.
     """
     labels = {"app.kubernetes.io/name": NAME, "app.kubernetes.io/managed-by": "modelplane"}
-    rendered = config(cluster, statements, exporters, extensions)
+    rendered = config(cluster, mappings, sinks, extensions)
     volumes: list[dict[str, Any]] = [{"name": "config", "configMap": {"name": NAME}}]
     mounts: list[dict[str, Any]] = [{"name": "config", "mountPath": "/conf"}]
     env_from: list[dict[str, Any]] = []
-    if secret_name:
+    for sink in sinks:
+        if not sink.secretRef:
+            continue
         # Mounted both ways. An environment variable is fixed for the life of a
         # process, so a rotated credential would need a restart to be read; a
         # mounted file is refreshed in place and an authenticator reading one
-        # picks the new credential up without one.
-        volumes.append({"name": "credentials", "secret": {"secretName": secret_name}})
-        mounts.append({"name": "credentials", "mountPath": "/etc/modelplane/telemetry", "readOnly": True})
-        env_from.append({"secretRef": {"name": secret_name}})
+        # picks the new credential up without one. The file is under the sink's
+        # own directory, so two sinks can both hold a key called `token`.
+        volume = f"credentials-{sink.name}"
+        volumes.append({"name": volume, "secret": {"secretName": sink.secretRef.name}})
+        mounts.append({"name": volume, "mountPath": f"/etc/modelplane/telemetry/{sink.name}", "readOnly": True})
+        env_from.append({"secretRef": {"name": sink.secretRef.name}})
 
     return [
         (

@@ -74,7 +74,9 @@ _PICKER = {
     "llm_d_epp_scheduler_e2e_duration_seconds": "modelplane_route_decision_seconds",
 }
 
-# The GPUs, through whichever vendor's exporter the stack installed.
+# The GPUs, through whichever vendor's exporter the stack installed. DCGM
+# reports framebuffer memory in MiB and energy in millijoules, and both are
+# renamed onto a name that claims a different unit, so both say so.
 _GPU = {
     "DCGM_FI_DEV_FB_USED": "modelplane_gpu_memory_used_bytes",
     "DCGM_FI_PROF_GR_ENGINE_ACTIVE": "modelplane_gpu_compute_active_ratio",
@@ -82,53 +84,48 @@ _GPU = {
     "DCGM_FI_PROF_DRAM_ACTIVE": "modelplane_gpu_memory_bandwidth_ratio",
     "DCGM_FI_DEV_GPU_TEMP": "modelplane_gpu_temperature_celsius",
     "DCGM_FI_DEV_POWER_USAGE": "modelplane_gpu_power_watts",
+    "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION": "modelplane_energy_joules_total",
+}
+
+_GPU_UNITS = {
+    "DCGM_FI_DEV_FB_USED": "Mebibytes",
+    "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION": "Millijoules",
 }
 
 
-def _rename(pairs: dict[str, str]) -> list[str]:
-    return [f'set(name, "{new}") where name == "{old}"' for old, new in pairs.items()]
-
-
-def _mapping(name: str, statements: list[str]) -> v1alpha1.MetricMapping:
+def _mapping(
+    name: str,
+    pairs: dict[str, str],
+    units: dict[str, str] | None = None,
+) -> v1alpha1.MetricMapping:
+    units = units or {}
     return v1alpha1.MetricMapping(
         metadata=metav1.ObjectMeta(name=name),
-        spec=v1alpha1.Spec(statements=[v1alpha1.Statement(st) for st in statements]),
+        spec=v1alpha1.Spec(
+            metrics=[
+                v1alpha1.Metric.model_validate(
+                    {"from": src, "to": dst} | ({"fromUnit": units[src]} if src in units else {})
+                )
+                for src, dst in pairs.items()
+            ]
+        ),
     )
 
 
 def mappings() -> list[v1alpha1.MetricMapping]:
     """The mappings Modelplane provides, as the kind an operator would write.
 
-    Built as MetricMappings rather than as a bare list of statements so the
-    collector renders Modelplane's own renames through the same path as an
-    operator's, and a built-in that breaks breaks the path everyone uses.
+    Built as MetricMappings rather than as collector configuration so that
+    Modelplane's own renames reach the collector down the same path an
+    operator's do, and a built-in that breaks breaks the path everyone uses.
     """
     return [
-        _mapping("modelplane-gateway", _rename(_GATEWAY)),
-        _mapping("modelplane-vllm", _rename(_VLLM)),
-        _mapping("modelplane-sglang", _rename(_SGLANG)),
-        _mapping("modelplane-picker", _rename(_PICKER)),
-        _mapping(
-            "modelplane-gpu",
-            _rename(_GPU) + _rename({"DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION": "modelplane_energy_joules_total"}),
-        ),
+        _mapping("modelplane-gateway", _GATEWAY),
+        _mapping("modelplane-vllm", _VLLM),
+        _mapping("modelplane-sglang", _SGLANG),
+        _mapping("modelplane-picker", _PICKER),
+        _mapping("modelplane-gpu", _GPU, _GPU_UNITS),
     ]
 
 
 BUILTIN_MAPPINGS = mappings()
-
-# A datapoint's value is out of reach of the metric context, so the one
-# statement that rewrites a value rather than a name runs in its own block
-# ahead of the renames. It has to be a block of its own rather than an earlier
-# line: the transform processor finishes a block over every datapoint before
-# starting the next, and a rename landing first would leave every datapoint
-# after the first unmatched and unscaled.
-#
-# DCGM reports energy in millijoules and framebuffer memory in MiB, and both
-# are renamed onto a name that states a different unit. Left to a query
-# instead, a name ending in _joules_total holding millijoules is the kind of
-# thing nobody notices until a bill.
-DATAPOINT_STATEMENTS = [
-    'set(value_double, value_double / 1000) where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
-    'set(value_double, value_double * 1048576) where metric.name == "DCGM_FI_DEV_FB_USED"',
-]

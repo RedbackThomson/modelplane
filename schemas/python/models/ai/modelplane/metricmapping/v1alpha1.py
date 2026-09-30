@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, RootModel, constr
+from pydantic import AwareDatetime, BaseModel, Field, constr
 
 from ....io.k8s.apimachinery.pkg.apis.meta import v1
 
@@ -42,8 +42,22 @@ class Crossplane(BaseModel):
     resourceRefs: list[ResourceRef] | None = None
 
 
-class Statement(RootModel[constr(max_length=2048)]):
-    root: constr(max_length=2048)
+class Metric(BaseModel):
+    from_: constr(max_length=255) = Field(..., alias='from')
+    """
+    The metric's name as the component emits it, matched exactly. Nothing here declares which engine a deployment runs: a name that no component emits simply matches nothing.
+    """
+    fromUnit: (
+        Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds'] | None
+    ) = None
+    """
+    What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, and mebibytes multiplied out to bytes.
+    Say it whenever the source disagrees with the target, even where the factor looks obvious. A name ending in _bytes that holds mebibytes is the kind of thing nobody notices until a capacity review, and stating the source unit is what makes the conversion happen at all.
+    """
+    to: constr(pattern=r'^modelplane_[a-z0-9_]*[a-z0-9]$', max_length=255)
+    """
+    What Modelplane calls it. Only modelplane_* leaves a cluster, so a metric with no name here is one nobody downstream can read.
+    """
 
 
 class Spec(BaseModel):
@@ -51,10 +65,10 @@ class Spec(BaseModel):
     """
     Configures how Crossplane will reconcile this composite resource
     """
-    statements: list[Statement] | None = Field(None, max_length=128)
+    metrics: list[Metric] = Field(..., max_length=128, min_length=1)
     """
-    OTTL statements, rendered into the collector's transform processor beside Modelplane's own. Modelplane does not interpret them: what you write here is the collector's own configuration language, documented by OpenTelemetry, and it is the same thing Modelplane writes for vLLM.
-    Statements select through their own where clauses, so nothing declares which engine a deployment runs.
+    The metrics this component emits, and what Modelplane calls them.
+    Rename only where the measurements agree. Two engines' histograms sharing a name are worth less than nothing if their buckets disagree, because a quantile across them is wrong rather than approximate.
     """
 
 
@@ -94,7 +108,7 @@ class MetricMapping(BaseModel):
     spec: Spec
     """
     How one component's metrics become part of the modelplane_* surface. Modelplane renders every MetricMapping into each inference cluster's collector, so a mapping is written once on the control plane and reaches the whole fleet.
-    A mapping naming a component Modelplane already provides statements for is additive: its statements run after the built-in ones.
+    A mapping naming a component Modelplane already provides renames for is additive: its renames run after the built-in ones, and a later rename of the same metric wins.
     """
     status: Status | None = None
 

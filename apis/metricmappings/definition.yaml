@@ -28,6 +28,7 @@ spec:
         properties:
           spec:
             type: object
+            required: [metrics]
             description: >-
               How one component's metrics become part of the modelplane_*
               surface. Modelplane renders every MetricMapping into each
@@ -35,24 +36,57 @@ spec:
               the control plane and reaches the whole fleet.
 
               A mapping naming a component Modelplane already provides
-              statements for is additive: its statements run after the
-              built-in ones.
+              renames for is additive: its renames run after the built-in
+              ones, and a later rename of the same metric wins.
             properties:
-              statements:
+              metrics:
                 type: array
-                description: >-
-                  OTTL statements, rendered into the collector's transform
-                  processor beside Modelplane's own. Modelplane does not
-                  interpret them: what you write here is the collector's own
-                  configuration language, documented by OpenTelemetry, and it
-                  is the same thing Modelplane writes for vLLM.
-
-                  Statements select through their own where clauses, so
-                  nothing declares which engine a deployment runs.
-                items:
-                  type: string
-                  maxLength: 2048
+                minItems: 1
                 maxItems: 128
+                description: >-
+                  The metrics this component emits, and what Modelplane calls
+                  them.
+
+                  Rename only where the measurements agree. Two engines'
+                  histograms sharing a name are worth less than nothing if
+                  their buckets disagree, because a quantile across them is
+                  wrong rather than approximate.
+                items:
+                  type: object
+                  required: [from, to]
+                  properties:
+                    from:
+                      type: string
+                      maxLength: 255
+                      description: >-
+                        The metric's name as the component emits it, matched
+                        exactly. Nothing here declares which engine a
+                        deployment runs: a name that no component emits simply
+                        matches nothing.
+                    to:
+                      type: string
+                      maxLength: 255
+                      pattern: '^modelplane_[a-z0-9_]*[a-z0-9]$'
+                      description: >-
+                        What Modelplane calls it. Only modelplane_* leaves a
+                        cluster, so a metric with no name here is one nobody
+                        downstream can read.
+                    fromUnit:
+                      type: string
+                      enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds]
+                      description: >-
+                        What the component measures this in, when that isn't
+                        the unit the name claims. Modelplane converts to the
+                        base unit: millijoules and milliseconds are divided by
+                        a thousand, nanoseconds by a billion, and mebibytes
+                        multiplied out to bytes.
+
+                        Say it whenever the source disagrees with the target,
+                        even where the factor looks obvious. A name ending in
+                        _bytes that holds mebibytes is the kind of thing
+                        nobody notices until a capacity review, and stating
+                        the source unit is what makes the conversion happen at
+                        all.
           status:
             type: object
             properties:

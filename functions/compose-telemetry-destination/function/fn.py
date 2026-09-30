@@ -14,12 +14,13 @@
 
 """Compose a TelemetryDestination.
 
-A TelemetryDestination carries the collector's exporters and extensions
-verbatim, and compose-serving-stack renders them into the collector it
-composes. Modelplane does not model what an exporter is, so there is little
-here to validate and the little there is matters: an exporter naming an
-authenticator that no extension defines makes a collector refuse to start,
-and that failure surfaces as telemetry silently never arriving.
+A TelemetryDestination names the sinks the fleet's metrics go to, each
+carrying an exporter's own configuration verbatim, and compose-serving-stack
+renders them into the collector it composes. Modelplane does not model what an
+exporter is, so there is little here to validate and the little there is
+matters: a sink naming an authenticator that no extension defines makes a
+collector refuse to start, and that failure surfaces as telemetry silently
+never arriving.
 """
 
 import grpc
@@ -30,12 +31,11 @@ from models.ai.modelplane.telemetrydestination import v1alpha1
 
 CONDITION_TYPE_ACCEPTED = "Accepted"
 CONDITION_REASON_AVAILABLE = "Available"
-CONDITION_REASON_NO_EXPORTERS = "NoExporters"
 CONDITION_REASON_UNKNOWN_AUTHENTICATOR = "UnknownAuthenticator"
 CONDITION_REASON_WAITING_FOR_SECRET = "WaitingForSecret"
 CONDITION_REASON_SECRET_NOT_FOUND = "SecretNotFound"
 
-_SECRET_KEY = "secret"
+_SECRET_PREFIX = "secret-"
 
 
 class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
@@ -55,17 +55,14 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         rsp = response.to(req)
         xr = v1alpha1.TelemetryDestination(**resource.struct_to_dict(req.observed.composite.resource))
 
-        exporters = xr.spec.exporters or {}
-        if not exporters:
-            _not_ready(rsp, CONDITION_REASON_NO_EXPORTERS, "No exporters, so collected telemetry has nowhere to go")
-            return rsp
+        sinks = list(xr.spec.sinks)
 
-        # An exporter's auth block names an authenticator by extension name. The
+        # A sink's auth block names an authenticator by extension name. The
         # collector refuses to start when it names one no extension defines, and
         # a collector that never starts looks exactly like a fleet that produces
         # nothing, so it is worth catching on the object instead.
         extensions = set((xr.spec.extensions or {}).keys())
-        missing = sorted(_authenticators(exporters) - extensions)
+        missing = sorted(_authenticators(sinks) - extensions)
         if missing:
             _not_ready(
                 rsp,
@@ -74,22 +71,25 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
             )
             return rsp
 
-        if xr.spec.secretRef is not None:
+        for sink in sinks:
+            if sink.secretRef is None:
+                continue
+            key = f"{_SECRET_PREFIX}{sink.name}"
             response.require_resources(
                 rsp,
-                name=_SECRET_KEY,
+                name=key,
                 api_version="v1",
                 kind="Secret",
-                match_name=xr.spec.secretRef.name,
+                match_name=sink.secretRef.name,
             )
-            if _SECRET_KEY not in req.required_resources:
+            if key not in req.required_resources:
                 _not_ready(rsp, CONDITION_REASON_WAITING_FOR_SECRET, "Waiting for the credential Secret to resolve")
                 return rsp
-            if not list(request.get_required_resources(req, _SECRET_KEY)):
+            if not list(request.get_required_resources(req, key)):
                 _not_ready(
                     rsp,
                     CONDITION_REASON_SECRET_NOT_FOUND,
-                    f"Secret {xr.spec.secretRef.name} does not exist, so the collector has no credential to send with",
+                    f"Secret {sink.secretRef.name} does not exist, so sink {sink.name} has no credential to send with",
                 )
                 return rsp
 
@@ -100,20 +100,18 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
                 typ=CONDITION_TYPE_ACCEPTED,
                 status="True",
                 reason=CONDITION_REASON_AVAILABLE,
-                message=f"Exporting through {', '.join(sorted(exporters))}",
+                message=f"Exporting through {', '.join(f'{s.type}/{s.name}' for s in sinks)}",
             ),
         )
         rsp.desired.composite.ready = fnv1.READY_TRUE
         return rsp
 
 
-def _authenticators(exporters: dict) -> set[str]:
-    """Every authenticator an exporter references, by extension name."""
+def _authenticators(sinks: list[v1alpha1.Sink]) -> set[str]:
+    """Every authenticator a sink references, by extension name."""
     names: set[str] = set()
-    for cfg in exporters.values():
-        if not isinstance(cfg, dict):
-            continue
-        auth = cfg.get("auth")
+    for sink in sinks:
+        auth = sink.config.get("auth")
         if isinstance(auth, dict) and isinstance(auth.get("authenticator"), str):
             names.add(auth["authenticator"])
     return names

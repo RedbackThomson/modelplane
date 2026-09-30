@@ -18,21 +18,35 @@ import unittest
 
 import yaml
 from function import collector, stacks
+from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 
-_EXPORTERS = {"otlphttp": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}}}
-_EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/token"}}
+_EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/primary/token"}}
 
 
-def _statements() -> list[str]:
-    return [str(st.root) for mp in stacks.BUILTIN_MAPPINGS for st in mp.spec.statements or []]
+def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> tdv1alpha1.Sink:
+    return tdv1alpha1.Sink.model_validate(
+        {
+            "name": name,
+            "type": type_,
+            "config": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}},
+            **({"secretRef": {"name": secret}} if secret else {}),
+        }
+    )
+
+
+_SINKS = [_sink()]
+
+
+def _metric_statements() -> list[str]:
+    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[1]
 
 
 def _config(*, extensions: dict | None = None) -> dict:
     return yaml.safe_load(
         collector.config(
             "prod-us-east",
-            _statements(),
-            _EXPORTERS,
+            list(stacks.BUILTIN_MAPPINGS),
+            _SINKS,
             _EXTENSIONS if extensions is None else extensions,
         )
     )
@@ -105,7 +119,7 @@ class TestConfig(unittest.TestCase):
 
     def test_sglang_latency_histograms_are_not_renamed(self) -> None:
         """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""
-        joined = " ".join(_statements())
+        joined = " ".join(_metric_statements())
         self.assertNotIn("sglang:time_to_first_token_seconds", joined)
         self.assertNotIn("sglang:inter_token_latency", joined)
 
@@ -114,7 +128,10 @@ class TestObjects(unittest.TestCase):
     """The manifests this composes."""
 
     def _objects(self, secret: str | None = None) -> dict:
-        return {k: m for k, m, _ in collector.objects("prod-us-east", _statements(), _EXPORTERS, _EXTENSIONS, secret)}
+        sinks = [_sink(secret=secret)] if secret else _SINKS
+        return {
+            k: m for k, m, _ in collector.objects("prod-us-east", list(stacks.BUILTIN_MAPPINGS), sinks, _EXTENSIONS)
+        }
 
     def test_config_hash_is_stable_across_processes(self) -> None:
         """hash() is seeded per process, so it would redeploy on every reconcile."""
@@ -126,8 +143,26 @@ class TestObjects(unittest.TestCase):
     def test_credentials_mount_as_a_file_and_an_environment_variable(self) -> None:
         """A rotated token in an environment variable needs a restart to be read."""
         pod = self._objects(secret="telemetry-credentials")["collector"]["spec"]["template"]["spec"]
-        self.assertIn("credentials", [v["name"] for v in pod["volumes"]])
+        self.assertIn("credentials-primary", [v["name"] for v in pod["volumes"]])
         self.assertEqual(pod["containers"][0]["envFrom"], [{"secretRef": {"name": "telemetry-credentials"}}])
+
+    def test_each_sink_gets_its_own_credential_directory(self) -> None:
+        """Two sinks can both hold a key called token, and neither reads the other's."""
+        sinks = [
+            _sink(name="vendor", secret="vendor-token"),
+            _sink(name="prometheus", type_="prometheusremotewrite", secret="prom-token"),
+        ]
+        pod = {
+            k: m for k, m, _ in collector.objects("prod-us-east", list(stacks.BUILTIN_MAPPINGS), sinks, _EXTENSIONS)
+        }["collector"]["spec"]["template"]["spec"]
+        mounts = {m["name"]: m["mountPath"] for m in pod["containers"][0]["volumeMounts"]}
+        self.assertEqual(mounts["credentials-vendor"], "/etc/modelplane/telemetry/vendor")
+        self.assertEqual(mounts["credentials-prometheus"], "/etc/modelplane/telemetry/prometheus")
+
+    def test_two_sinks_of_one_type_do_not_collide(self) -> None:
+        """The collector names a second instance of a component <type>/<name>."""
+        rendered = collector.exporters([_sink(name="a"), _sink(name="b")])
+        self.assertEqual(sorted(rendered), ["otlphttp/a", "otlphttp/b"])
 
     def test_no_secret_mounts_nothing(self) -> None:
         pod = self._objects()["collector"]["spec"]["template"]["spec"]

@@ -1,21 +1,12 @@
 ---
-title: Telemetry
-weight: 20
-draft: true
+title: Monitor the Fleet
+weight: 37
 aliases:
 - /guides/collecting-engine-metrics/
+- /guides/telemetry/
 description: Collect normalized metrics across the fleet and send them anywhere that speaks OTLP.
 ---
 <!-- vale write-good.Passive = NO -->
-{{< hint warning >}}
-**Draft.** This page documents [the metrics design][design], which isn't built yet. It's
-here to check the experience reads well before it's implemented, and it's excluded from the
-site by `draft: true`. It replaces [Collecting engine metrics]({{< ref
-"guides/collecting-engine-metrics.md" >}}) when the per-cluster Prometheus stack is
-removed, and takes that page's URL with it.
-
-[design]: https://github.com/modelplaneai/modelplane/pull/363
-{{< /hint >}}
 
 Modelplane runs an OpenTelemetry collector on every inference cluster. It collects from
 every component Modelplane installs, which is more than your engines. It renames each
@@ -70,27 +61,31 @@ kind: TelemetryDestination
 metadata:
   name: default
 spec:
-  exporters:
-    otlphttp:
+  sinks:
+  - name: primary
+    type: otlphttp
+    config:
       endpoint: https://otel.example.internal
 ```
 
-`spec.exporters` is the OpenTelemetry collector's own exporters block, so any exporter the
-collector provides works here, with its usual TLS and retry settings.
+`type` names a collector exporter, and `config` is that exporter's own configuration, so any
+exporter the collector provides works here with its usual TLS and retry settings.
 
-Put credentials in a Secret and name it with `secretRef`. Modelplane mounts its keys into
-the collector as environment variables, so your config refers to `${env:OTLP_TOKEN}` and the
-token never appears in `kubectl get -o yaml`:
+Put credentials in a Secret and name it with the sink's `secretRef`. Modelplane mounts its
+keys as environment variables, so your config refers to `${env:OTLP_TOKEN}` and the token
+never appears in `kubectl get -o yaml`:
 
 ```yaml
 spec:
-  secretRef:
-    name: telemetry-credentials
   extensions:
     bearertokenauth:
       token: ${env:OTLP_TOKEN}
-  exporters:
-    otlphttp:
+  sinks:
+  - name: primary
+    type: otlphttp
+    secretRef:
+      name: telemetry-credentials
+    config:
       endpoint: https://otel.example.internal
       auth:
         authenticator: bearertokenauth
@@ -100,10 +95,32 @@ If you run Prometheus, export to that instead and query the fleet there:
 
 ```yaml
 spec:
-  exporters:
-    prometheusremotewrite:
+  sinks:
+  - name: prometheus
+    type: prometheusremotewrite
+    config:
       endpoint: https://prom.example.internal/api/v1/write
 ```
+
+Name more than one sink and every one gets the whole stream. Each carries its own
+credential, so a vendor and your own Prometheus don't have to share a Secret:
+
+```yaml
+spec:
+  sinks:
+  - name: vendor
+    type: otlphttp
+    secretRef:
+      name: vendor-token
+    config:
+      endpoint: https://otel.vendor.example
+  - name: prometheus
+    type: prometheusremotewrite
+    config:
+      endpoint: https://prom.example.internal/api/v1/write
+```
+
+That is two copies of the fleet's metrics, billed twice.
 
 Until you create one, Modelplane composes no collectors: nothing here stores anything, so
 collecting with nowhere to send it would spend GPU-cluster memory on samples nobody reads.
@@ -144,14 +161,25 @@ kind: MetricMapping
 metadata:
   name: my-engine
 spec:
-  statements:
-  - set(name, "modelplane_requests_waiting")
-      where name == "my_engine_queued_requests"
+  metrics:
+  - from: my_engine_queued_requests
+    to: modelplane_requests_waiting
+  - from: my_engine_kv_transfer_ms
+    fromUnit: Milliseconds
+    to: modelplane_request_kv_transfer_seconds
 ```
 
-`spec.statements` are OTTL, the collector's own transform language. Modelplane renders them
-into every cluster's collector, so you write them once. An engine with no statements is
-still collected, under its own names.
+Modelplane renders every mapping into every cluster's collector, so you write one once.
+`from` is the name your engine emits and `to` is what Modelplane calls it.
+
+Say `fromUnit` whenever the engine measures in something other than the unit the name
+claims, and Modelplane converts to the base one. Skipping it is the expensive mistake here:
+a series named `_seconds` that holds milliseconds reads a thousand times fast, and nothing
+downstream can tell.
+
+Rename only where the measurements agree. Two engines' histograms under one name are worth
+less than nothing if their buckets disagree, because a quantile over them is wrong rather
+than approximate.
 
 One engine needs a flag. SGLang publishes `/metrics` only when it runs with
 `--enable-metrics`, so add it to the engine args. vLLM needs nothing.
@@ -169,17 +197,19 @@ token for both.
 
 ## Migrating from a hand-written `PodMonitor`
 
-[Collecting engine metrics]({{< ref "guides/collecting-engine-metrics.md" >}}) had you write
-a `PodMonitor` and reach the in-cluster Prometheus over a `port-forward`. Both are gone, and
-this page replaces that one. Three steps, and two of them fail quietly if you skip them.
+Modelplane used to have you write a `PodMonitor` and reach an in-cluster Prometheus over a
+`port-forward`. Both are gone. Three steps to move across, and two of them fail quietly if
+you skip them.
 
 **Keep your Prometheus, and point a destination at it.** Collection becomes a push, so your
 store stops scraping and starts receiving. Same Prometheus, same retention, same Grafana:
 
 ```yaml
 spec:
-  exporters:
-    prometheusremotewrite:
+  sinks:
+  - name: prometheus
+    type: prometheusremotewrite
+    config:
       endpoint: http://prometheus.monitoring.svc:9090/api/v1/write
 ```
 
@@ -239,6 +269,6 @@ deleted once your panels use the new ones.
 
 A series no statement renames doesn't leave the cluster. If a panel needs an engine's
 own name, write a `MetricMapping` that renames it onto the `modelplane_*` surface: a
-mapping for an engine Modelplane already knows adds to the built-in statements rather
+mapping for an engine Modelplane already knows adds to the built-in renames rather
 than replacing them.
 <!-- vale write-good.Passive = YES -->
