@@ -47,7 +47,7 @@ spec:
                 x-kubernetes-list-map-keys: [name]
                 items:
                   type: object
-                  required: [name, type, endpoint]
+                  required: [name, type]
                   x-kubernetes-validations:
                   - rule: "!has(self.auth) || has(self.secretRef)"
                     message: secretRef is required when auth is set, because the credential lives in it.
@@ -80,10 +80,16 @@ spec:
                       maxLength: 2048
                       description: >-
                         Where this sink writes. Typed rather than left to the
-                        configuration below because every exporter has one and
-                        a destination with no endpoint is the mistake worth
+                        configuration below because it is the setting every
+                        destination has to get right, and the one worth
                         catching here rather than in a collector that won't
                         start.
+
+                        Optional, because not every exporter addresses its
+                        destination this way: Kafka takes brokers, the file
+                        exporter a path, and the debug exporter nothing at
+                        all. Those go in the configuration below, under the
+                        names that exporter gives them.
                     auth:
                       type: object
                       description: >-

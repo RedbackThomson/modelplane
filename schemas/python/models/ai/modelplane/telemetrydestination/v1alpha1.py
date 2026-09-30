@@ -67,9 +67,10 @@ class Sink(BaseModel):
     Anything else that exporter takes, passed through unread: TLS, retry, queueing, compression, headers.
     Modelplane does not model an exporter's configuration, because the schema is OpenTelemetry's and versioned separately. Typing it would mean a Modelplane release for each setting the collector gains, and would drop the ones this has never heard of. What is typed above is what belongs to Modelplane: which sinks exist, what each is called, where it writes, and which Secret it reads.
     """
-    endpoint: constr(max_length=2048)
+    endpoint: constr(max_length=2048) | None = None
     """
-    Where this sink writes. Typed rather than left to the configuration below because every exporter has one and a destination with no endpoint is the mistake worth catching here rather than in a collector that won't start.
+    Where this sink writes. Typed rather than left to the configuration below because it is the setting every destination has to get right, and the one worth catching here rather than in a collector that won't start.
+    Optional, because not every exporter addresses its destination this way: Kafka takes brokers, the file exporter a path, and the debug exporter nothing at all. Those go in the configuration below, under the names that exporter gives them.
     """
     name: constr(pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', max_length=63)
     """

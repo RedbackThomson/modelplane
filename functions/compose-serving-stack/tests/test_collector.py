@@ -182,6 +182,19 @@ class TestObjects(unittest.TestCase):
         rendered = collector.exporters([_sink(name="a"), _sink(name="b")])
         self.assertEqual(sorted(rendered), ["otlphttp/a", "otlphttp/b"])
 
+    def test_a_sink_that_addresses_its_destination_another_way(self) -> None:
+        """Kafka takes brokers, the debug exporter nothing; neither has an endpoint."""
+        sinks = [
+            tdv1alpha1.Sink.model_validate(
+                {"name": "bus", "type": "kafka", "config": {"brokers": ["kafka.acme.example:9092"]}}
+            ),
+            tdv1alpha1.Sink.model_validate({"name": "seen", "type": "debug"}),
+        ]
+        rendered = collector.exporters(sinks)
+        self.assertNotIn("endpoint", rendered["kafka/bus"])
+        self.assertEqual(rendered["kafka/bus"]["brokers"], ["kafka.acme.example:9092"])
+        self.assertEqual(rendered["debug/seen"], {})
+
     def test_auth_composes_its_own_authenticator(self) -> None:
         """The collector carries no credential on an exporter, only a reference."""
         sink = _sink(secret="telemetry-credentials")

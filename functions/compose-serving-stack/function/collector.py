@@ -199,7 +199,8 @@ def exporters(sinks: list[tdv1alpha1.Sink]) -> dict[str, Any]:
     rendered: dict[str, Any] = {}
     for sink in sinks:
         cfg: dict[str, Any] = dict(sink.config or {})
-        cfg["endpoint"] = sink.endpoint
+        if sink.endpoint:
+            cfg["endpoint"] = sink.endpoint
         if sink.auth and sink.auth.bearerTokenKey:
             cfg["auth"] = {"authenticator": f"bearertokenauth/{sink.name}"}
         rendered[f"{sink.type}/{sink.name}"] = cfg
