@@ -42,6 +42,13 @@ class Crossplane(BaseModel):
     resourceRefs: list[ResourceRef] | None = None
 
 
+class Auth(BaseModel):
+    bearerTokenKey: constr(max_length=253) | None = None
+    """
+    The key in this sink's Secret holding the bearer token. Modelplane mounts it as a file and points the authenticator at it, so a rotated token is picked up without restarting the collector.
+    """
+
+
 class SecretRef(BaseModel):
     name: constr(max_length=253)
     """
@@ -50,18 +57,28 @@ class SecretRef(BaseModel):
 
 
 class Sink(BaseModel):
-    config: dict[str, Any]
+    auth: Auth | None = None
     """
-    That exporter's own configuration, passed through unread. Modelplane does not model what an exporter is, so TLS, retry, queue and compression settings all work, and a sink keeps working when the collector gains a setting Modelplane has never heard of.
+    How to authenticate, for the schemes Modelplane composes. The collector takes no credential inline: it authenticates through an extension an exporter names, so setting this composes that extension and wires the reference.
+    A scheme that isn't here is still reachable. Define the extension yourself under spec.extensions and name it from this sink's config, which is what Modelplane does on your behalf.
+    """
+    config: dict[str, Any] | None = None
+    """
+    Anything else that exporter takes, passed through unread: TLS, retry, queueing, compression, headers.
+    Modelplane does not model an exporter's configuration, because the schema is OpenTelemetry's and versioned separately. Typing it would mean a Modelplane release for each setting the collector gains, and would drop the ones this has never heard of. What is typed above is what belongs to Modelplane: which sinks exist, what each is called, where it writes, and which Secret it reads.
+    """
+    endpoint: constr(max_length=2048)
+    """
+    Where this sink writes. Typed rather than left to the configuration below because every exporter has one and a destination with no endpoint is the mistake worth catching here rather than in a collector that won't start.
     """
     name: constr(pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', max_length=63)
     """
-    This sink's name, unique within the destination. It names the collector's exporter instance and the directory its credential mounts at, so renaming one restarts the collector.
+    This sink's name, unique within the destination. It names the collector's exporter instance, the authenticator Modelplane composes for it, and the directory its credential mounts at, so renaming one restarts the collector.
     """
     secretRef: SecretRef | None = None
     """
-    A Secret holding this sink's credential. Its keys reach the collector as environment variables, for config above referring to ${env:TOKEN}, and as files under /etc/modelplane/telemetry/<sink name>/, for an authenticator reading one from disk.
-    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. The files are per sink; the environment variables are not, so two Secrets sharing a key name still collide there and the file is the one to read. A file is refreshed in place where an environment variable is fixed for the life of the process, so an authenticator reading the file picks up a rotated credential without a restart.
+    A Secret holding this sink's credential. Its keys reach the collector as files under /etc/modelplane/telemetry/<sink name>/, and as environment variables, for configuration above referring to ${env:TOKEN}.
+    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. The files are per sink; the environment variables are not, so two Secrets sharing a key name still collide there and the file is the one to read.
     """
     type: constr(max_length=63)
     """

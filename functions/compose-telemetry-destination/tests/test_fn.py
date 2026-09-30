@@ -49,15 +49,17 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         """The function reports whether a destination can actually be sent through."""
 
         def sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> dict:
+            """A sink wiring its own authenticator, which is the case worth validating."""
             return {
                 "name": name,
                 "type": type_,
-                "config": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}},
+                "endpoint": "https://otel.acme.example",
+                "config": {"auth": {"authenticator": "oidc/acme"}},
                 **({"secretRef": {"name": secret}} if secret else {}),
             }
 
         sinks = [sink()]
-        extensions = {"bearertokenauth": {"token": "${env:OTLP_TOKEN}"}}
+        extensions = {"oidc/acme": {"issuer_url": "https://issuer.acme.example"}}
 
         def xr(spec: dict) -> dict:
             return {
@@ -116,7 +118,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "prom",
                                 "type": "prometheusremotewrite",
-                                "config": {"endpoint": "https://prom.acme.example/api/v1/write"},
+                                "endpoint": "https://prom.acme.example/api/v1/write",
                             }
                         ]
                     }
@@ -130,6 +132,38 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         reason="Available",
                         message="Exporting through prometheusremotewrite/prom",
                     ),
+                ),
+            ),
+            Case(
+                name="ready with no extensions, because Modelplane composes the authenticator",
+                req=req(
+                    {
+                        "sinks": [
+                            {
+                                "name": "primary",
+                                "type": "otlphttp",
+                                "endpoint": "https://otel.acme.example",
+                                "secretRef": {"name": "telemetry-credentials"},
+                                "auth": {"bearerTokenKey": "token"},
+                            }
+                        ]
+                    },
+                    secrets=[
+                        resource.dict_to_struct(
+                            {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
+                        )
+                    ],
+                ),
+                want=want(
+                    fnv1.READY_TRUE,
+                    {"status": {}},
+                    fnv1.Condition(
+                        type="Accepted",
+                        status=fnv1.STATUS_CONDITION_TRUE,
+                        reason="Available",
+                        message="Exporting through otlphttp/primary",
+                    ),
+                    secret="telemetry-credentials",
                 ),
             ),
             Case(
@@ -181,7 +215,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_FALSE,
                         reason="UnknownAuthenticator",
-                        message="No extension defines bearertokenauth, so the collector would refuse to start",
+                        message="No extension defines oidc/acme, so the collector would refuse to start",
                     ),
                 ),
             ),

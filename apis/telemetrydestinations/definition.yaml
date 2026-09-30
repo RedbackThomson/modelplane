@@ -47,7 +47,10 @@ spec:
                 x-kubernetes-list-map-keys: [name]
                 items:
                   type: object
-                  required: [name, type, config]
+                  required: [name, type, endpoint]
+                  x-kubernetes-validations:
+                  - rule: "!has(self.auth) || has(self.secretRef)"
+                    message: secretRef is required when auth is set, because the credential lives in it.
                   properties:
                     name:
                       type: string
@@ -55,7 +58,8 @@ spec:
                       pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
                       description: >-
                         This sink's name, unique within the destination. It
-                        names the collector's exporter instance and the
+                        names the collector's exporter instance, the
+                        authenticator Modelplane composes for it, and the
                         directory its credential mounts at, so renaming one
                         restarts the collector.
                     type:
@@ -71,35 +75,68 @@ spec:
                         a Modelplane release for each exporter the collector
                         gains, and the collector already refuses to start on a
                         name it doesn't have.
+                    endpoint:
+                      type: string
+                      maxLength: 2048
+                      description: >-
+                        Where this sink writes. Typed rather than left to the
+                        configuration below because every exporter has one and
+                        a destination with no endpoint is the mistake worth
+                        catching here rather than in a collector that won't
+                        start.
+                    auth:
+                      type: object
+                      description: >-
+                        How to authenticate, for the schemes Modelplane
+                        composes. The collector takes no credential inline: it
+                        authenticates through an extension an exporter names,
+                        so setting this composes that extension and wires the
+                        reference.
+
+                        A scheme that isn't here is still reachable. Define
+                        the extension yourself under spec.extensions and name
+                        it from this sink's config, which is what Modelplane
+                        does on your behalf.
+                      properties:
+                        bearerTokenKey:
+                          type: string
+                          maxLength: 253
+                          description: >-
+                            The key in this sink's Secret holding the bearer
+                            token. Modelplane mounts it as a file and points
+                            the authenticator at it, so a rotated token is
+                            picked up without restarting the collector.
                     config:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                       description: >-
-                        That exporter's own configuration, passed through
-                        unread. Modelplane does not model what an exporter is,
-                        so TLS, retry, queue and compression settings all
-                        work, and a sink keeps working when the collector
-                        gains a setting Modelplane has never heard of.
+                        Anything else that exporter takes, passed through
+                        unread: TLS, retry, queueing, compression, headers.
+
+                        Modelplane does not model an exporter's configuration,
+                        because the schema is OpenTelemetry's and versioned
+                        separately. Typing it would mean a Modelplane release
+                        for each setting the collector gains, and would drop
+                        the ones this has never heard of. What is typed above
+                        is what belongs to Modelplane: which sinks exist, what
+                        each is called, where it writes, and which Secret it
+                        reads.
                     secretRef:
                       type: object
                       required: [name]
                       description: >-
                         A Secret holding this sink's credential. Its keys
-                        reach the collector as environment variables, for
-                        config above referring to ${env:TOKEN}, and as files
-                        under /etc/modelplane/telemetry/<sink name>/, for an
-                        authenticator reading one from disk.
+                        reach the collector as files under
+                        /etc/modelplane/telemetry/<sink name>/, and as
+                        environment variables, for configuration above
+                        referring to ${env:TOKEN}.
 
                         Per sink rather than per destination, so two sinks
                         with different credentials don't have to share one
                         Secret and tell their keys apart by prefix. The files
                         are per sink; the environment variables are not, so
                         two Secrets sharing a key name still collide there and
-                        the file is the one to read. A file is
-                        refreshed in place where an environment variable is
-                        fixed for the life of the process, so an authenticator
-                        reading the file picks up a rotated credential without
-                        a restart.
+                        the file is the one to read.
                       properties:
                         name:
                           type: string

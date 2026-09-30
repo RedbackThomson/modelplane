@@ -18,9 +18,9 @@ A TelemetryDestination names the sinks the fleet's metrics go to, each
 carrying an exporter's own configuration verbatim, and compose-serving-stack
 renders them into the collector it composes. Modelplane does not model what an
 exporter is, so there is little here to validate and the little there is
-matters: a sink naming an authenticator that no extension defines makes a
-collector refuse to start, and that failure surfaces as telemetry silently
-never arriving.
+matters: a sink naming an authenticator that nothing defines makes a collector
+refuse to start, and that failure surfaces as telemetry silently never
+arriving.
 """
 
 import grpc
@@ -61,8 +61,11 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         # collector refuses to start when it names one no extension defines, and
         # a collector that never starts looks exactly like a fleet that produces
         # nothing, so it is worth catching on the object instead.
-        extensions = set((xr.spec.extensions or {}).keys())
-        missing = sorted(_authenticators(sinks) - extensions)
+        # An authenticator is defined either by the operator, under extensions,
+        # or by Modelplane, for a sink that set auth. Both count.
+        defined = set((xr.spec.extensions or {}).keys())
+        defined |= {f"bearertokenauth/{s.name}" for s in sinks if s.auth and s.auth.bearerTokenKey}
+        missing = sorted(_authenticators(sinks) - defined)
         if missing:
             _not_ready(
                 rsp,
@@ -108,10 +111,10 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
 
 
 def _authenticators(sinks: list[v1alpha1.Sink]) -> set[str]:
-    """Every authenticator a sink references, by extension name."""
+    """Every authenticator a sink's own config references, by extension name."""
     names: set[str] = set()
     for sink in sinks:
-        auth = sink.config.get("auth")
+        auth = (sink.config or {}).get("auth")
         if isinstance(auth, dict) and isinstance(auth.get("authenticator"), str):
             names.add(auth["authenticator"])
     return names

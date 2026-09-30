@@ -64,32 +64,29 @@ spec:
   sinks:
   - name: primary
     type: otlphttp
-    config:
-      endpoint: https://otel.example.internal
+    endpoint: https://otel.example.internal
 ```
 
-`type` names a collector exporter, and `config` is that exporter's own configuration, so any
-exporter the collector provides works here with its usual TLS and retry settings.
+`type` names a collector exporter, by the name OpenTelemetry gives it.
 
-Put credentials in a Secret and name it with the sink's `secretRef`. Modelplane mounts its
-keys as environment variables, so your config refers to `${env:OTLP_TOKEN}` and the token
-never appears in `kubectl get -o yaml`:
+Put the credential in a Secret, name it with the sink's `secretRef`, and say which key holds
+the token. Modelplane composes the authenticator and wires it up, and the token never
+appears in `kubectl get -o yaml`:
 
 ```yaml
 spec:
-  extensions:
-    bearertokenauth:
-      token: ${env:OTLP_TOKEN}
   sinks:
   - name: primary
     type: otlphttp
+    endpoint: https://otel.example.internal
     secretRef:
       name: telemetry-credentials
-    config:
-      endpoint: https://otel.example.internal
-      auth:
-        authenticator: bearertokenauth
+    auth:
+      bearerTokenKey: token
 ```
+
+It reads the token from a file rather than the environment, so rotating it doesn't need the
+collector restarted.
 
 If you run Prometheus, export to that instead and query the fleet there:
 
@@ -98,8 +95,7 @@ spec:
   sinks:
   - name: prometheus
     type: prometheusremotewrite
-    config:
-      endpoint: https://prom.example.internal/api/v1/write
+    endpoint: https://prom.example.internal/api/v1/write
 ```
 
 Name more than one sink and every one gets the whole stream. Each carries its own
@@ -110,17 +106,37 @@ spec:
   sinks:
   - name: vendor
     type: otlphttp
+    endpoint: https://otel.vendor.example
     secretRef:
       name: vendor-token
-    config:
-      endpoint: https://otel.vendor.example
+    auth:
+      bearerTokenKey: token
   - name: prometheus
     type: prometheusremotewrite
-    config:
-      endpoint: https://prom.example.internal/api/v1/write
+    endpoint: https://prom.example.internal/api/v1/write
 ```
 
 That is two copies of the fleet's metrics, billed twice.
+
+Anything else the exporter takes goes under `config`, passed through as you wrote it:
+
+```yaml
+  - name: vendor
+    type: otlphttp
+    endpoint: https://otel.vendor.example
+    config:
+      compression: gzip
+      sending_queue:
+        queue_size: 10000
+      tls:
+        ca_file: /etc/ssl/certs/internal.pem
+```
+
+Modelplane doesn't model what an exporter is, so its TLS, retry and queue settings all work,
+and a sink keeps working when the collector gains a setting Modelplane has never heard of.
+An authentication scheme Modelplane doesn't compose works the same way: define the extension
+under `spec.extensions` and name it from the sink's `config`, which is what the `auth` block
+above does for you.
 
 Until you create one, Modelplane composes no collectors: nothing here stores anything, so
 collecting with nowhere to send it would spend GPU-cluster memory on samples nobody reads.

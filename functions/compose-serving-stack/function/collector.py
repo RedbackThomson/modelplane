@@ -34,6 +34,7 @@ from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 
 NAMESPACE = "modelplane-system"
 NAME = "modelplane-collector"
+_CREDENTIALS_DIR = "/etc/modelplane/telemetry"
 
 IMAGE = "otel/opentelemetry-collector-contrib:0.161.0"
 
@@ -160,14 +161,49 @@ def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
     return {"metric_statements": blocks}
 
 
+def _credential_path(sink: tdv1alpha1.Sink, key: str) -> str:
+    return f"{_CREDENTIALS_DIR}/{sink.name}/{key}"
+
+
+def authenticators(sinks: list[tdv1alpha1.Sink]) -> dict[str, Any]:
+    """The extensions Modelplane composes for the sinks that asked for one.
+
+    The collector carries no credential on an exporter: it authenticates
+    through an extension the exporter names. A typed auth block is therefore
+    an extension plus a reference, not a field, and composing both is what
+    keeps `auth` from being something an operator has to assemble by hand.
+    """
+    composed: dict[str, Any] = {}
+    for sink in sinks:
+        if sink.auth and sink.auth.bearerTokenKey:
+            composed[f"bearertokenauth/{sink.name}"] = {
+                # A file rather than the environment: an environment variable
+                # is fixed for the life of the process, so a rotated token
+                # would need a restart to be read.
+                "filename": _credential_path(sink, sink.auth.bearerTokenKey),
+            }
+    return composed
+
+
 def exporters(sinks: list[tdv1alpha1.Sink]) -> dict[str, Any]:
     """The sinks as the collector's exporters block.
 
     A sink renders under `<type>/<name>`, which is how the collector names a
     second instance of one component, so two sinks of the same type don't
     collide.
+
+    The endpoint and the authenticator reference are Modelplane's, and go on
+    last: an operator's own config can carry anything the exporter takes, but
+    not quietly redirect the sink somewhere else or unpick its credential.
     """
-    return {f"{sink.type}/{sink.name}": dict(sink.config) for sink in sinks}
+    rendered: dict[str, Any] = {}
+    for sink in sinks:
+        cfg: dict[str, Any] = dict(sink.config or {})
+        cfg["endpoint"] = sink.endpoint
+        if sink.auth and sink.auth.bearerTokenKey:
+            cfg["auth"] = {"authenticator": f"bearertokenauth/{sink.name}"}
+        rendered[f"{sink.type}/{sink.name}"] = cfg
+    return rendered
 
 
 def config(
@@ -183,6 +219,9 @@ def config(
     same to carry as one that was renamed.
     """
     sink_exporters = exporters(sinks)
+    # Modelplane's authenticators last: an operator's extensions can define
+    # anything, but not replace the one composed for a sink's own auth block.
+    extensions = {**extensions, **authenticators(sinks)}
     processors: dict[str, Any] = {
         # cluster is stamped here rather than downstream: one receiver on the
         # control plane sees a merged stream and cannot tell senders apart.
@@ -263,7 +302,7 @@ def objects(
         # own directory, so two sinks can both hold a key called `token`.
         volume = f"credentials-{sink.name}"
         volumes.append({"name": volume, "secret": {"secretName": sink.secretRef.name}})
-        mounts.append({"name": volume, "mountPath": f"/etc/modelplane/telemetry/{sink.name}", "readOnly": True})
+        mounts.append({"name": volume, "mountPath": f"{_CREDENTIALS_DIR}/{sink.name}", "readOnly": True})
         env_from.append({"secretRef": {"name": sink.secretRef.name}})
 
     return [

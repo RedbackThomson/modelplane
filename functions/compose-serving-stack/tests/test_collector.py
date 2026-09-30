@@ -23,7 +23,7 @@ from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
 from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 from pydantic import ValidationError
 
-_EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/primary/token"}}
+_EXTENSIONS = {"oidc/acme": {"issuer_url": "https://issuer.acme.example"}}
 
 
 def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> tdv1alpha1.Sink:
@@ -31,8 +31,8 @@ def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = N
         {
             "name": name,
             "type": type_,
-            "config": {"endpoint": "https://otel.acme.example", "auth": {"authenticator": "bearertokenauth"}},
-            **({"secretRef": {"name": secret}} if secret else {}),
+            "endpoint": "https://otel.acme.example",
+            **({"secretRef": {"name": secret}, "auth": {"bearerTokenKey": "token"}} if secret else {}),
         }
     )
 
@@ -91,7 +91,7 @@ class TestConfig(unittest.TestCase):
 
     def test_extensions_are_declared_to_the_service(self) -> None:
         """An authenticator the service doesn't list is one the collector won't load."""
-        self.assertEqual(_config()["service"]["extensions"], ["bearertokenauth"])
+        self.assertEqual(_config()["service"]["extensions"], ["oidc/acme"])
         self.assertNotIn("extensions", _config(extensions={})["service"])
 
     def test_energy_is_scaled_before_it_is_renamed(self) -> None:
@@ -181,6 +181,32 @@ class TestObjects(unittest.TestCase):
         """The collector names a second instance of a component <type>/<name>."""
         rendered = collector.exporters([_sink(name="a"), _sink(name="b")])
         self.assertEqual(sorted(rendered), ["otlphttp/a", "otlphttp/b"])
+
+    def test_auth_composes_its_own_authenticator(self) -> None:
+        """The collector carries no credential on an exporter, only a reference."""
+        sink = _sink(secret="telemetry-credentials")
+        self.assertEqual(
+            collector.authenticators([sink]),
+            {"bearertokenauth/primary": {"filename": "/etc/modelplane/telemetry/primary/token"}},
+        )
+        self.assertEqual(
+            collector.exporters([sink])["otlphttp/primary"]["auth"],
+            {"authenticator": "bearertokenauth/primary"},
+        )
+
+    def test_a_sinks_own_config_cannot_redirect_it(self) -> None:
+        """The endpoint is Modelplane's, and goes on after the operator's config."""
+        sink = tdv1alpha1.Sink.model_validate(
+            {
+                "name": "primary",
+                "type": "otlphttp",
+                "endpoint": "https://otel.acme.example",
+                "config": {"endpoint": "https://elsewhere.example", "compression": "gzip"},
+            }
+        )
+        rendered = collector.exporters([sink])["otlphttp/primary"]
+        self.assertEqual(rendered["endpoint"], "https://otel.acme.example")
+        self.assertEqual(rendered["compression"], "gzip")
 
     def test_no_secret_mounts_nothing(self) -> None:
         pod = self._objects()["collector"]["spec"]["template"]["spec"]
