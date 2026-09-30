@@ -296,6 +296,81 @@
       );
     };
 
+  # Run the composition functions' unit tests outside the sandbox, against the
+  # same virtualenvs nix flake check uses. With no function named it runs every
+  # function's tests, each in a pytest session of its own because every
+  # function's package is named `function`. Arguments after the function name
+  # go to pytest, e.g. nix run .#test -- compose-usages -k namespace.
+  test =
+    {
+      pythonSet,
+      functionNames,
+    }:
+    let
+      venvs = map (name: {
+        inherit name;
+        venv = pythonSet.mkVirtualEnv "${name}-test-env" {
+          ${name} = [ ];
+          pytest = [ ];
+        };
+      }) functionNames;
+      cases = pkgs.lib.concatMapStrings (v: ''
+        ${v.name}) python=${v.venv}/bin/python ;;
+      '') venvs;
+    in
+    {
+      type = "app";
+      meta.description = "Run the composition functions' unit tests";
+      program = pkgs.lib.getExe (
+        pkgs.writeShellApplication {
+          name = "modelplane-test";
+          runtimeInputs = [ pkgs.coreutils ];
+          inheritPath = false;
+          text = ''
+            run() {
+              local fn="$1" python
+              shift
+              case "$fn" in
+                ${cases}
+                *)
+                  echo "no such function: $fn" >&2
+                  return 2
+                  ;;
+              esac
+              "$python" -m pytest "functions/$fn/tests" "$@"
+            }
+
+            if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+              run "$@"
+              exit
+            fi
+
+            # pytest exits 5 when it runs no tests, as when -k selects none of
+            # a function's. That's a failure only if no function ran any.
+            failed=()
+            ran=false
+            for fn in ${pkgs.lib.concatStringsSep " " functionNames}; do
+              code=0
+              run "$fn" "$@" || code=$?
+              case "$code" in
+                0) ran=true ;;
+                5) ;;
+                *) failed+=("$fn") ;;
+              esac
+            done
+            if [ ''${#failed[@]} -gt 0 ]; then
+              echo "failed: ''${failed[*]}" >&2
+              exit 1
+            fi
+            if [ "$ran" = false ]; then
+              echo "no tests ran" >&2
+              exit 5
+            fi
+          '';
+        }
+      );
+    };
+
   # Run the two-cluster local end-to-end test: a workload
   # kind cluster registered via source: Existing (serving stack + model) and a
   # control-plane cluster (crossplane + the InferenceGateway). Two clusters

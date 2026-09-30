@@ -331,8 +331,10 @@ the function emits.
 
 Some existing tests (`compose-serving-stack`, the second method in
 `compose-eks-cluster`) predate this form and assert on individual fields. Don't
-model new tests on them. Add new cases to the function's `test_fn.py` and run
-`nix flake check` to verify they pass.
+model new tests on them. Add new cases to the function's `test_fn.py`, and run
+them with `nix run .#test`. Name a function to run only its tests, and pass
+pytest arguments after it, as in `nix run .#test -- compose-usages -k
+namespace`. `nix flake check` runs them too.
 
 ### Running locally
 
