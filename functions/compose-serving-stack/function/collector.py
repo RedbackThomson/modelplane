@@ -30,6 +30,8 @@ from typing import Any
 
 import yaml
 
+from function.stacks import metrics as stacks_metrics
+
 NAMESPACE = "modelplane-system"
 NAME = "modelplane-collector"
 
@@ -114,8 +116,19 @@ def _scrape_configs() -> list[dict[str, Any]]:
 
 
 def _transform(statements: list[str]) -> dict[str, Any]:
-    """Modelplane's renames, then whatever the MetricMappings add."""
-    return {"metric_statements": [{"context": "metric", "statements": statements}]}
+    """Value rewrites first, then every rename.
+
+    Two blocks rather than one list: a statement reaching a datapoint's value
+    can't run in the metric context, and the processor finishes a block over
+    every datapoint before it starts the next, which is what keeps a rename
+    from stranding the datapoints a value rewrite hasn't reached yet.
+    """
+    return {
+        "metric_statements": [
+            {"context": "datapoint", "statements": list(stacks_metrics.DATAPOINT_STATEMENTS)},
+            {"context": "metric", "statements": statements},
+        ]
+    }
 
 
 def config(

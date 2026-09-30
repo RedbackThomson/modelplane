@@ -785,10 +785,13 @@ class Composer:
                 f"{_name(dest.metadata)}. Telemetry has one destination per fleet.",
             )
 
-        statements: list[str] = list(stacks.METRIC_STATEMENTS)
-        for m in request.get_required_resources(self.req, "mappings"):
-            mapping = mmv1alpha1.MetricMapping.model_validate(m)
-            statements += [str(st.root) for st in mapping.spec.statements or []]
+        # Modelplane's own mappings first, then the operator's, which add to
+        # them rather than replacing them.
+        mappings = list(stacks.BUILTIN_MAPPINGS)
+        mappings += [
+            mmv1alpha1.MetricMapping.model_validate(m) for m in request.get_required_resources(self.req, "mappings")
+        ]
+        statements: list[str] = [str(st.root) for mp in mappings for st in mp.spec.statements or []]
 
         pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)

@@ -23,11 +23,15 @@ _EXPORTERS = {"otlphttp": {"endpoint": "https://otel.acme.example", "auth": {"au
 _EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/token"}}
 
 
+def _statements() -> list[str]:
+    return [str(st.root) for mp in stacks.BUILTIN_MAPPINGS for st in mp.spec.statements or []]
+
+
 def _config(*, extensions: dict | None = None) -> dict:
     return yaml.safe_load(
         collector.config(
             "prod-us-east",
-            list(stacks.METRIC_STATEMENTS),
+            _statements(),
             _EXPORTERS,
             _EXTENSIONS if extensions is None else extensions,
         )
@@ -74,15 +78,27 @@ class TestConfig(unittest.TestCase):
         self.assertNotIn("extensions", _config(extensions={})["service"])
 
     def test_energy_is_scaled_before_it_is_renamed(self) -> None:
-        """DCGM counts millijoules, and the name says joules."""
-        statements = stacks.METRIC_STATEMENTS
-        scale = next(i for i, s in enumerate(statements) if "value_double / 1000" in s)
-        rename = next(i for i, s in enumerate(statements) if "modelplane_energy_joules_total" in s)
-        self.assertLess(scale, rename)
+        """DCGM counts millijoules, and the name says joules.
+
+        The scale is a block ahead of the renames, not a line ahead. The
+        processor finishes a block over every datapoint before the next one
+        starts, so a rename sharing the block would strand every datapoint
+        after the first at millijoules.
+        """
+        blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
+        self.assertEqual([b["context"] for b in blocks], ["datapoint", "metric"])
+        self.assertTrue(any("value_double / 1000" in st for st in blocks[0]["statements"]))
+        self.assertTrue(any("modelplane_energy_joules_total" in st for st in blocks[1]["statements"]))
+
+    def test_a_value_rewrite_never_lands_in_the_metric_context(self) -> None:
+        """value_double is a datapoint path; the collector refuses to start on it here."""
+        blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
+        metric_block = next(b for b in blocks if b["context"] == "metric")
+        self.assertFalse([st for st in metric_block["statements"] if "value_double" in st])
 
     def test_sglang_latency_histograms_are_not_renamed(self) -> None:
         """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""
-        joined = " ".join(stacks.METRIC_STATEMENTS)
+        joined = " ".join(_statements())
         self.assertNotIn("sglang:time_to_first_token_seconds", joined)
         self.assertNotIn("sglang:inter_token_latency", joined)
 
@@ -91,12 +107,7 @@ class TestObjects(unittest.TestCase):
     """The manifests this composes."""
 
     def _objects(self, secret: str | None = None) -> dict:
-        return {
-            k: m
-            for k, m, _ in collector.objects(
-                "prod-us-east", list(stacks.METRIC_STATEMENTS), _EXPORTERS, _EXTENSIONS, secret
-            )
-        }
+        return {k: m for k, m, _ in collector.objects("prod-us-east", _statements(), _EXPORTERS, _EXTENSIONS, secret)}
 
     def test_config_hash_is_stable_across_processes(self) -> None:
         """hash() is seeded per process, so it would redeploy on every reconcile."""
