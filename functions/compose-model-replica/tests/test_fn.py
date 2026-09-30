@@ -197,6 +197,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                                                 "template": {
                                                     "metadata": {
                                                         "labels": {
+                                                            "modelplane.ai/deployment": "my-deployment",
+                                                            "modelplane.ai/engine": "main",
+                                                            "modelplane.ai/role": "Standalone",
                                                             "modelplane.ai/serving": "test-replica",
                                                             "modelplane.ai/workload": resource.child_name(
                                                                 "test-replica", "main"

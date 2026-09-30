@@ -43,6 +43,7 @@ IMAGE = "otel/opentelemetry-collector-contrib:0.161.0"
 # default, and matching by number would find the pd-sidecar on a disaggregated
 # pod rather than the engine behind it.
 _SERVING_LABEL = "modelplane_ai_serving"
+_DEPLOYMENT_LABEL = "modelplane_ai_deployment"
 _METRICS_PORT = "http"
 
 _SCRAPE_INTERVAL = "15s"
@@ -52,14 +53,18 @@ _SUBSTRATE_INTERVAL = "30s"
 def _relabel_pod_identity() -> list[dict[str, Any]]:
     """Carry Modelplane's identity from the pod's labels onto every series.
 
-    A recorded series inherits these, so a MetricMapping's statements need no
-    labels of their own.
+    A series inherits these, so a MetricMapping needs no labels of its own.
+    compose-model-replica stamps them; a pod carrying none is one no deployment
+    owns.
+
+    No model: a ModelReplica doesn't know which ModelService fronts it, and a
+    model name carries a slash, which a label value can't. Deployment is finer
+    grained anyway - a deployment serves one model, a model may have several.
     """
     return [
         {"source_labels": [f"__meta_kubernetes_pod_label_{src}"], "target_label": dst}
         for src, dst in (
             ("modelplane_ai_deployment", "deployment"),
-            ("modelplane_ai_model", "model"),
             ("modelplane_ai_engine", "engine"),
             ("modelplane_ai_role", "role"),
         )
@@ -110,7 +115,15 @@ def _scrape_configs() -> list[dict[str, Any]]:
             "scrape_interval": _SCRAPE_INTERVAL,
             "kubernetes_sd_configs": [{"role": "pod"}],
             "relabel_configs": [
-                {"source_labels": [f"__meta_kubernetes_pod_label_{_SERVING_LABEL}"], "action": "keep", "regex": "true"},
+                # Every serving pod carries the deployment it belongs to,
+                # workers included: a worker holds GPUs, and the GPU series are
+                # the deployment's. Matched on presence, because the value is
+                # the deployment's name.
+                {
+                    "source_labels": [f"__meta_kubernetes_pod_label_{_DEPLOYMENT_LABEL}"],
+                    "action": "keep",
+                    "regex": ".+",
+                },
                 {
                     "source_labels": ["__meta_kubernetes_pod_container_port_name"],
                     "action": "keep",
@@ -290,7 +303,7 @@ def config(
         # A pod's identity is a resource attribute, where a metric processor
         # cannot reach it. Strip and merge the resources first, or the
         # aggregation below combines nothing.
-        "groupbyattrs/replicas": {"keys": ["cluster", "namespace", "deployment", "model", "engine", "role"]},
+        "groupbyattrs/replicas": {"keys": ["cluster", "namespace", "deployment", "engine", "role"]},
         "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
         "batch": {"timeout": "10s"},
     }

@@ -115,7 +115,10 @@ class NativeBackend:
             "spec": {
                 "replicas": int(engine.copies or 1),
                 "selector": {"matchLabels": selector},
-                "template": {"metadata": base.pod_metadata(member, pod_labels), "spec": pod_spec},
+                "template": {
+                    "metadata": base.pod_metadata(member, pod_labels, replica=replica, engine=engine),
+                    "spec": pod_spec,
+                },
             },
         }
 

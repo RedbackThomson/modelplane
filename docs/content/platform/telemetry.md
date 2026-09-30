@@ -20,7 +20,7 @@ deployments change.
 ## What you get
 
 Every series carries `cluster`. A series about a deployment also carries `deployment`,
-`namespace`, `model`, and `engine`. Some of what you can read:
+`namespace`, `engine`, and `role`. Some of what you can read:
 
 | Metric | Means |
 | --- | --- |
@@ -235,9 +235,9 @@ everything twice, under `vllm:*` and under `modelplane_*`, paying for both. One 
 against Modelplane's Prometheus stops being read by anything, because the operator goes with
 the stack.
 
-**Rewrite your dashboard queries.** Names change, and so do three labels: `model_name`
-becomes `model`, pod labels are gone because replicas are summed before they leave the
-cluster, and every series now carries `cluster`.
+**Rewrite your dashboard queries.** Names change, and so do the labels: group by
+`deployment` rather than `model_name`, pod labels are gone because replicas are summed
+before they leave the cluster, and every series now carries `cluster`.
 
 | Was | Is |
 | --- | --- |

@@ -241,8 +241,46 @@ LABEL_SERVING = "modelplane.ai/serving"
 # Deployment selectors fighting over each other's pods.
 LABEL_WORKLOAD = "modelplane.ai/workload"
 
+# Pod labels carrying the identity every metric off this pod is attributed to.
+# The collector reads them off the pod during service discovery and stamps them
+# on each series, so a MetricMapping needs no labels of its own and a series
+# merged across replicas keeps the identity all of them share. Metrics are the
+# only reason these exist; nothing selects on them.
+LABEL_DEPLOYMENT = "modelplane.ai/deployment"
+LABEL_ENGINE = "modelplane.ai/engine"
+LABEL_ROLE = "modelplane.ai/role"
 
-def pod_metadata(member: v1alpha1.Member, labels: dict[str, str] | None = None) -> dict:
+
+def telemetry_labels(
+    replica: v1alpha1.ModelReplica,
+    engine: v1alpha1.Engine,
+    member: v1alpha1.Member,
+) -> dict[str, str]:
+    """What a metric off this pod is attributed to.
+
+    The deployment comes off the replica, which the composite already labels
+    with it. There is no model here on purpose: a ModelReplica doesn't know
+    which ModelService fronts it, and a model name carries a slash, which a
+    label value can't.
+    """
+    labels: dict[str, str] = {}
+    deployment = (replica.metadata.labels if replica.metadata else None) or {}
+    if name := deployment.get(LABEL_DEPLOYMENT):
+        labels[LABEL_DEPLOYMENT] = name
+    if engine.name:
+        labels[LABEL_ENGINE] = engine.name
+    if member.role:
+        labels[LABEL_ROLE] = member.role
+    return labels
+
+
+def pod_metadata(
+    member: v1alpha1.Member,
+    labels: dict[str, str] | None = None,
+    *,
+    replica: v1alpha1.ModelReplica,
+    engine: v1alpha1.Engine,
+) -> dict:
     """Pod template metadata for a member: its template.metadata plus managed labels.
 
     The member's template.metadata.labels and .annotations propagate to the pod
@@ -255,6 +293,7 @@ def pod_metadata(member: v1alpha1.Member, labels: dict[str, str] | None = None) 
     """
     user = member.template.metadata
     merged = dict((user.labels if user else None) or {})
+    merged.update(telemetry_labels(replica, engine, member))
     merged.update(labels or {})
     meta: dict = {}
     if merged:

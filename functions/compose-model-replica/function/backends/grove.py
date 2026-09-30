@@ -151,6 +151,8 @@ class GroveBackend:
                     base.GROVE_QUEUE_LABEL: base.GROVE_QUEUE,
                     _LABEL_CLIQUE_ROLE: "leader",
                 },
+                replica=replica,
+                engine=engine,
             ),
             "spec": {
                 "roleName": base.GROVE_LEADER_CLIQUE,
@@ -170,7 +172,7 @@ class GroveBackend:
         # stable DNS name until it's listening.
         worker_clique = {
             "name": base.GROVE_WORKER_CLIQUE,
-            **base.pod_metadata(worker, {base.GROVE_QUEUE_LABEL: base.GROVE_QUEUE}),
+            **base.pod_metadata(worker, {base.GROVE_QUEUE_LABEL: base.GROVE_QUEUE}, replica=replica, engine=engine),
             "spec": {
                 "roleName": base.GROVE_WORKER_CLIQUE,
                 "replicas": worker_replicas,

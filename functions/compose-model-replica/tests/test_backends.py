@@ -35,6 +35,8 @@ from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 _SERVING = "modelplane.ai/serving"
+_ENGINE = "modelplane.ai/engine"
+_ROLE = "modelplane.ai/role"
 _WORKLOAD = "modelplane.ai/workload"
 _CLIQUE_ROLE = "modelplane.ai/clique-role"
 _QUEUE_LABEL = "kai.scheduler/queue"
@@ -206,7 +208,9 @@ _NATIVE_WANT = {
             "replicas": 1,
             "selector": {"matchLabels": {_WORKLOAD: _WORKLOAD_NAME}},
             "template": {
-                "metadata": {"labels": {_SERVING: "r", _WORKLOAD: _WORKLOAD_NAME}},
+                "metadata": {
+                    "labels": {_ENGINE: "main", _ROLE: "Standalone", _SERVING: "r", _WORKLOAD: _WORKLOAD_NAME}
+                },
                 "spec": {
                     "containers": [
                         {
@@ -283,7 +287,13 @@ def _pcs(leader_container: dict, worker_container: dict, *, worker_replicas: int
                 "cliques": [
                     {
                         "name": "leader",
-                        "labels": {_SERVING: "r", _QUEUE_LABEL: _QUEUE, _CLIQUE_ROLE: "leader"},
+                        "labels": {
+                            _ENGINE: "main",
+                            _ROLE: "Leader",
+                            _SERVING: "r",
+                            _QUEUE_LABEL: _QUEUE,
+                            _CLIQUE_ROLE: "leader",
+                        },
                         "spec": {
                             "roleName": "leader",
                             "replicas": 1,
@@ -293,7 +303,7 @@ def _pcs(leader_container: dict, worker_container: dict, *, worker_replicas: int
                     },
                     {
                         "name": "worker",
-                        "labels": {_QUEUE_LABEL: _QUEUE},
+                        "labels": {_ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE},
                         "spec": {
                             "roleName": "worker",
                             "replicas": worker_replicas,
@@ -481,7 +491,13 @@ class TestBackendManifests(unittest.TestCase):
         meta = out["model-serving-main"].spec.forProvider.manifest["spec"]["template"]["metadata"]
         self.assertEqual(
             meta["labels"],
-            {"example.com/role": "standalone", _SERVING: "r", _WORKLOAD: _WORKLOAD_NAME},
+            {
+                "example.com/role": "standalone",
+                _ENGINE: "main",
+                _ROLE: "Standalone",
+                _SERVING: "r",
+                _WORKLOAD: _WORKLOAD_NAME,
+            },
         )
         self.assertEqual(meta["annotations"], {"example.com/config": "standalone"})
 
@@ -502,11 +518,20 @@ class TestBackendManifests(unittest.TestCase):
         leader = _clique(manifest, "leader")
         self.assertEqual(
             leader["labels"],
-            {"example.com/role": "leader", _SERVING: "r", _QUEUE_LABEL: _QUEUE, _CLIQUE_ROLE: "leader"},
+            {
+                "example.com/role": "leader",
+                _ENGINE: "main",
+                _ROLE: "Leader",
+                _SERVING: "r",
+                _QUEUE_LABEL: _QUEUE,
+                _CLIQUE_ROLE: "leader",
+            },
         )
         self.assertEqual(leader["annotations"], {"example.com/config": "leader"})
         worker = _clique(manifest, "worker")
-        self.assertEqual(worker["labels"], {"example.com/role": "worker", _QUEUE_LABEL: _QUEUE})
+        self.assertEqual(
+            worker["labels"], {"example.com/role": "worker", _ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE}
+        )
         self.assertEqual(worker["annotations"], {"example.com/config": "worker"})
 
     def test_worker_without_metadata_composes_only_managed_labels(self) -> None:
@@ -517,7 +542,7 @@ class TestBackendManifests(unittest.TestCase):
         out = grove.GroveBackend().build(replica, engine, _PC, base.serving_label(replica), "Dynamo")
         manifest = out["model-serving-main"].spec.forProvider.manifest
         worker = _clique(manifest, "worker")
-        self.assertEqual(worker["labels"], {_QUEUE_LABEL: _QUEUE})
+        self.assertEqual(worker["labels"], {_ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE})
         self.assertNotIn("annotations", worker)
 
     @staticmethod
@@ -668,8 +693,13 @@ class TestLLMDBackend(unittest.TestCase):
         leader_labels = lwt["leaderTemplate"]["metadata"]["labels"]
         self.assertEqual(leader_labels[_SERVING], "r")
         self.assertEqual(leader_labels[self._LWS_ROLE], "leader")
-        # The worker followers never serve, so they carry no metadata at all.
-        self.assertNotIn("metadata", lwt["workerTemplate"])
+        # The worker followers never serve, so they carry no serving label and
+        # the replica's Service can't route to them. They do carry the
+        # telemetry identity: a worker holds GPUs, and its metrics are the
+        # deployment's.
+        worker_labels = lwt["workerTemplate"]["metadata"]["labels"]
+        self.assertNotIn(_SERVING, worker_labels)
+        self.assertEqual(worker_labels, {_ENGINE: "main", _ROLE: "Worker"})
 
     def test_leader_address_and_rank_env_injected(self) -> None:
         # Every gang container leads with the backend-neutral coordination vars
@@ -1099,7 +1129,7 @@ class TestDisaggregated(unittest.TestCase):
         worker_clique = _clique(manifest, "worker")
         worker = worker_clique["spec"]["podSpec"]
         self.assertEqual([c["name"] for c in worker["containers"]], ["engine"])
-        self.assertEqual(worker_clique["labels"], {_QUEUE_LABEL: _QUEUE})
+        self.assertEqual(worker_clique["labels"], {_ENGINE: "decode", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE})
 
 
 class TestUnifiedRouting(unittest.TestCase):

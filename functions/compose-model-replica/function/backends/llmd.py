@@ -133,7 +133,9 @@ class LLMDBackend:
         # serving port, and the readiness probe. The leader member's own
         # template.metadata merges in underneath them.
         leader_pod = {
-            "metadata": base.pod_metadata(leader, {base.LABEL_SERVING: serving_label, _LABEL_ROLE: "leader"}),
+            "metadata": base.pod_metadata(
+                leader, {base.LABEL_SERVING: serving_label, _LABEL_ROLE: "leader"}, replica=replica, engine=engine
+            ),
             "spec": pod_spec(leader, container(leader, serving=True)),
         }
         # The worker followers don't serve the OpenAI API, so they carry no
@@ -145,7 +147,7 @@ class LLMDBackend:
         worker_pod = {
             "spec": pod_spec(worker, container(worker, serving=False)),
         }
-        worker_metadata = base.pod_metadata(worker)
+        worker_metadata = base.pod_metadata(worker, replica=replica, engine=engine)
         if worker_metadata:
             worker_pod["metadata"] = worker_metadata
 
