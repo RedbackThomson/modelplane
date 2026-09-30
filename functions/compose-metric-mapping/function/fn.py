@@ -70,14 +70,8 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
         clusters = len(list(request.get_required_resources(req, "clusters")))
         resource.update_status(rsp.desired.composite, v1alpha1.Status(clusters=clusters))
 
-        # A mapping carrying neither statements nor passthrough does nothing at
-        # all, which is worth saying rather than reporting ready.
-        if not xr.spec.statements and not xr.spec.passthrough:
-            _not_ready(
-                rsp,
-                CONDITION_REASON_NO_STATEMENTS,
-                "No statements and passthrough is off, so this mapping changes nothing",
-            )
+        if not xr.spec.statements:
+            _not_ready(rsp, CONDITION_REASON_NO_STATEMENTS, "No statements, so this mapping changes nothing")
             return rsp
 
         if clusters == 0:

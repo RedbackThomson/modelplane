@@ -51,12 +51,6 @@ class Spec(BaseModel):
     """
     Configures how Crossplane will reconcile this composite resource
     """
-    passthrough: bool | None = False
-    """
-    Send this component's own metric names onward as well as the modelplane_* ones they become.
-    Off by default, because a series the statements did not rename is one whose meaning Modelplane cannot vouch for across engines, and it costs the same to carry as one that was renamed. On, for reading an engine's raw names during a migration or while debugging that engine.
-    A passed-through series is still merged across a deployment's replicas, so it keeps the labels the engine gave it and carries no pod identity.
-    """
     statements: list[Statement] | None = Field(None, max_length=128)
     """
     OTTL statements, rendered into the collector's transform processor beside Modelplane's own. Modelplane does not interpret them: what you write here is the collector's own configuration language, documented by OpenTelemetry, and it is the same thing Modelplane writes for vLLM.
@@ -100,7 +94,7 @@ class MetricMapping(BaseModel):
     spec: Spec
     """
     How one component's metrics become part of the modelplane_* surface. Modelplane renders every MetricMapping into each inference cluster's collector, so a mapping is written once on the control plane and reaches the whole fleet.
-    A mapping naming a component Modelplane already provides statements for is additive: its statements run after the built-in ones and its flags apply. That is how passthrough is turned on for an engine that needs no statements of its own.
+    A mapping naming a component Modelplane already provides statements for is additive: its statements run after the built-in ones.
     """
     status: Status | None = None
 

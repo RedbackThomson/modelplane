@@ -33,10 +33,7 @@ import yaml
 NAMESPACE = "modelplane-system"
 NAME = "modelplane-collector"
 
-# Pinned rather than floating: a collector that silently changed what it
-# renames on a chart bump would move the metric surface under an operator's
-# dashboards.
-IMAGE = "otel/opentelemetry-collector-contrib:0.139.0"
+IMAGE = "otel/opentelemetry-collector-contrib:0.161.0"
 
 # The label Modelplane stamps on every serving pod, and the port name it gives
 # the engine's metrics. Both matter: an engine container's port is unnamed by
@@ -126,15 +123,12 @@ def config(
     statements: list[str],
     exporters: dict[str, Any],
     extensions: dict[str, Any],
-    *,
-    keep_raw: bool,
 ) -> str:
     """The collector's configuration, as YAML.
 
-    Only modelplane_* leaves the cluster unless a MetricMapping asked to keep an
-    engine's own names: a series the statements did not rename is one whose
-    meaning Modelplane cannot vouch for across engines, and it costs the same to
-    carry as one that was renamed.
+    Only modelplane_* leaves the cluster: a series the statements did not rename
+    is one whose meaning Modelplane cannot vouch for across engines, and it
+    costs the same to carry as one that was renamed.
     """
     processors: dict[str, Any] = {
         # cluster is stamped here rather than downstream: one receiver on the
@@ -145,15 +139,16 @@ def config(
         # cannot reach it. Strip and merge the resources first, or the
         # aggregation below combines nothing.
         "groupbyattrs/replicas": {"keys": ["cluster", "namespace", "deployment", "model", "engine", "role"]},
+        "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
         "batch": {"timeout": "10s"},
     }
-    pipeline = ["resource/cluster", "transform/modelplane", "groupbyattrs/replicas"]
-    if not keep_raw:
-        processors["filter/modelplane"] = {
-            "metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']},
-        }
-        pipeline.append("filter/modelplane")
-    pipeline.append("batch")
+    pipeline = [
+        "resource/cluster",
+        "transform/modelplane",
+        "groupbyattrs/replicas",
+        "filter/modelplane",
+        "batch",
+    ]
 
     service: dict[str, Any] = {
         "pipelines": {"metrics": {"receivers": ["prometheus"], "processors": pipeline, "exporters": sorted(exporters)}},
@@ -183,12 +178,20 @@ def objects(
     exporters: dict[str, Any],
     extensions: dict[str, Any],
     secret_name: str | None,
-    *,
-    keep_raw: bool,
 ) -> list[tuple[str, dict[str, Any], str | None]]:
-    """The collector as (key, manifest, readiness CEL) triples."""
+    """The collector as (key, manifest, readiness CEL) triples.
+
+    Composed here rather than as a Manifests entry in the stack because the
+    stack is fixed at build time and every object here depends on request-time
+    data: the ConfigMap holds config rendered from the TelemetryDestination and
+    the MetricMappings, the Deployment carries that config's digest and the
+    destination's optional Secret mounts, and none of it exists at all until a
+    TelemetryDestination does. The ServiceAccount and RBAC would fit the stack,
+    but splitting one component across two mechanisms would put a collector's
+    permissions on clusters running no collector.
+    """
     labels = {"app.kubernetes.io/name": NAME, "app.kubernetes.io/managed-by": "modelplane"}
-    rendered = config(cluster, statements, exporters, extensions, keep_raw=keep_raw)
+    rendered = config(cluster, statements, exporters, extensions)
     volumes: list[dict[str, Any]] = [{"name": "config", "configMap": {"name": NAME}}]
     mounts: list[dict[str, Any]] = [{"name": "config", "mountPath": "/conf"}]
     env_from: list[dict[str, Any]] = []
@@ -217,7 +220,6 @@ def objects(
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "ClusterRole",
                 "metadata": {"name": NAME, "labels": labels},
-                # Read-only, and only what Kubernetes service discovery needs.
                 "rules": [
                     {
                         "apiGroups": [""],
@@ -262,12 +264,10 @@ def objects(
                     "template": {
                         "metadata": {
                             "labels": {"app.kubernetes.io/name": NAME},
-                            # The config is a file, so a changed ConfigMap does
-                            # not restart the pod on its own. Hashed with
-                            # sha256 rather than hash(), whose string seed is
-                            # randomised per process: the annotation would
-                            # differ on every reconcile and redeploy the
-                            # collector forever.
+                            # A changed ConfigMap doesn't restart the pod on
+                            # its own. sha256 rather than hash(), whose string
+                            # seed is randomised per process and would redeploy
+                            # the collector on every reconcile.
                             "annotations": {"modelplane.ai/config-hash": _digest(rendered)},
                         },
                         "spec": {

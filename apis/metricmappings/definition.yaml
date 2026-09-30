@@ -5,7 +5,7 @@ metadata:
 spec:
   group: modelplane.ai
   names:
-    categories: [crossplane, modelplane]
+    categories: [crossplane, modelplane, platform]
     kind: MetricMapping
     plural: metricmappings
     shortNames: [mm]
@@ -36,8 +36,7 @@ spec:
 
               A mapping naming a component Modelplane already provides
               statements for is additive: its statements run after the
-              built-in ones and its flags apply. That is how passthrough is
-              turned on for an engine that needs no statements of its own.
+              built-in ones.
             properties:
               statements:
                 type: array
@@ -54,22 +53,6 @@ spec:
                   type: string
                   maxLength: 2048
                 maxItems: 128
-              passthrough:
-                type: boolean
-                default: false
-                description: >-
-                  Send this component's own metric names onward as well as the
-                  modelplane_* ones they become.
-
-                  Off by default, because a series the statements did not
-                  rename is one whose meaning Modelplane cannot vouch for
-                  across engines, and it costs the same to carry as one that
-                  was renamed. On, for reading an engine's raw names during a
-                  migration or while debugging that engine.
-
-                  A passed-through series is still merged across a
-                  deployment's replicas, so it keeps the labels the engine
-                  gave it and carries no pod identity.
           status:
             type: object
             properties:

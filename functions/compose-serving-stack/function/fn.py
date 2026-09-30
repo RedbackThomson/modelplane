@@ -786,11 +786,9 @@ class Composer:
             )
 
         statements: list[str] = list(stacks.METRIC_STATEMENTS)
-        keep_raw = False
         for m in request.get_required_resources(self.req, "mappings"):
             mapping = mmv1alpha1.MetricMapping.model_validate(m)
             statements += [str(st.root) for st in mapping.spec.statements or []]
-            keep_raw = keep_raw or bool(mapping.spec.passthrough)
 
         pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
@@ -801,7 +799,6 @@ class Composer:
             exporters=dict(dest.spec.exporters or {}),
             extensions=dict(dest.spec.extensions or {}),
             secret_name=dest.spec.secretRef.name if dest.spec.secretRef else None,
-            keep_raw=keep_raw,
         ):
             if not (pc_observed or key in self.req.observed.resources):
                 continue

@@ -23,14 +23,13 @@ _EXPORTERS = {"otlphttp": {"endpoint": "https://otel.acme.example", "auth": {"au
 _EXTENSIONS = {"bearertokenauth": {"filename": "/etc/modelplane/telemetry/token"}}
 
 
-def _config(*, keep_raw: bool = False, extensions: dict | None = None) -> dict:
+def _config(*, extensions: dict | None = None) -> dict:
     return yaml.safe_load(
         collector.config(
             "prod-us-east",
             list(stacks.METRIC_STATEMENTS),
             _EXPORTERS,
             _EXTENSIONS if extensions is None else extensions,
-            keep_raw=keep_raw,
         )
     )
 
@@ -49,9 +48,9 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(procs[-1], "batch")
 
     def test_only_modelplane_leaves_the_cluster(self) -> None:
-        """A series the statements didn't rename is dropped, unless asked for."""
+        """A series the statements didn't rename is dropped."""
         self.assertIn("filter/modelplane", _config()["processors"])
-        self.assertNotIn("filter/modelplane", _config(keep_raw=True)["processors"])
+        self.assertIn("filter/modelplane", _config()["service"]["pipelines"]["metrics"]["processors"])
 
     def test_cluster_is_stamped_here(self) -> None:
         """One receiver downstream sees a merged stream and can't tell senders apart."""
@@ -95,7 +94,7 @@ class TestObjects(unittest.TestCase):
         return {
             k: m
             for k, m, _ in collector.objects(
-                "prod-us-east", list(stacks.METRIC_STATEMENTS), _EXPORTERS, _EXTENSIONS, secret, keep_raw=False
+                "prod-us-east", list(stacks.METRIC_STATEMENTS), _EXPORTERS, _EXTENSIONS, secret
             )
         }
 

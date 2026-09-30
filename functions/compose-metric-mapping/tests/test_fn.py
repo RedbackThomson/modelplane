@@ -84,7 +84,6 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             )
 
         no_statements = {**mapping, "spec": {}}
-        passthrough_only = {**mapping, "spec": {"passthrough": True}}
 
         cases = [
             Case(
@@ -98,20 +97,6 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         status=fnv1.STATUS_CONDITION_TRUE,
                         reason="Available",
                         message="Rendered into 2 inference cluster(s)",
-                    ),
-                ),
-            ),
-            Case(
-                name="ready on passthrough alone, which is a mapping with no statements to write",
-                req=req(passthrough_only, [cluster]),
-                want=want(
-                    fnv1.READY_TRUE,
-                    {"status": {"clusters": 1}},
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_TRUE,
-                        reason="Available",
-                        message="Rendered into 1 inference cluster(s)",
                     ),
                 ),
             ),
@@ -139,7 +124,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_FALSE,
                         reason="NoStatements",
-                        message="No statements and passthrough is off, so this mapping changes nothing",
+                        message="No statements, so this mapping changes nothing",
                     ),
                 ),
             ),

@@ -5,7 +5,7 @@ metadata:
 spec:
   group: modelplane.ai
   names:
-    categories: [crossplane, modelplane]
+    categories: [crossplane, modelplane, platform]
     kind: TelemetryDestination
     plural: telemetrydestinations
     shortNames: [td]
@@ -15,9 +15,6 @@ spec:
     served: true
     referenceable: true
     additionalPrinterColumns:
-    - name: COLLECTOR
-      type: string
-      jsonPath: .spec.collector
     - name: AGE
       type: date
       jsonPath: .metadata.creationTimestamp
@@ -39,21 +36,6 @@ spec:
               There is no per-deployment opt-out. A ModelDeployment's author
               owns neither the destination nor its bill.
             properties:
-              collector:
-                type: string
-                default: Composed
-                enum: [Composed, External]
-                description: >-
-                  Whether Modelplane runs the fleet collector. Composed (the
-                  default) puts one on the control plane, and every inference
-                  cluster exports to it. External composes none, for a
-                  platform that already operates one: each inference cluster
-                  then exports to the endpoint below directly.
-
-                  External gives up the single egress point, one place to
-                  change the destination, and the control plane's own series
-                  reaching the fleet without a path of their own. Whoever
-                  imposed the endpoint has usually provided them already.
               exporters:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true

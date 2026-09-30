@@ -124,8 +124,9 @@ histogram_quantile(0.99, sum by (le) (
   rate(modelplane_frontend_ttft_seconds_bucket{model="Qwen/Qwen3-8B"}[5m])))
 ```
 
-Modelplane provides these as queries and Grafana dashboards rather than as precomputed
-series. To precompute them, export to Prometheus and write recording rules there.
+Modelplane has no dashboards of its own. What it exports is counters and histogram buckets, and
+your backend derives the rates and quantiles at query time. To precompute them instead,
+export to Prometheus and write recording rules there.
 
 ## Engines
 
@@ -236,11 +237,8 @@ rule evaluation per metric over series your backend already holds, so it costs f
 collecting everything twice. It covers the names in the table above, and it's meant to be
 deleted once your panels use the new ones.
 
-For a raw series with no `modelplane_*` name at all, set `passthrough: true` on a
-`MetricMapping` for that engine and its own names stay readable on the cluster. vLLM and
-SGLang have no mapping of their own, so write one carrying just the flag: a mapping for an
-engine Modelplane already knows adds to the built-in statements rather than replacing them.
-
-These series are still merged across replicas, so they keep `model_name` and your old
-grouping works, but they carry no pod label.
+A series no statement renames doesn't leave the cluster. If a panel needs an engine's
+own name, write a `MetricMapping` that renames it onto the `modelplane_*` surface: a
+mapping for an engine Modelplane already knows adds to the built-in statements rather
+than replacing them.
 <!-- vale write-good.Passive = YES -->

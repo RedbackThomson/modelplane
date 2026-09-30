@@ -71,8 +71,7 @@ _PICKER = {
     "llm_d_epp_scheduler_e2e_duration_seconds": "modelplane_route_decision_seconds",
 }
 
-# The GPUs, through whichever vendor's exporter the stack installed. DCGM
-# reports energy in millijoules, which the unit in the name says it is not.
+# The GPUs, through whichever vendor's exporter the stack installed.
 _GPU = {
     "DCGM_FI_DEV_FB_USED": "modelplane_gpu_memory_used_bytes",
     "DCGM_FI_PROF_GR_ENGINE_ACTIVE": "modelplane_gpu_compute_active_ratio",

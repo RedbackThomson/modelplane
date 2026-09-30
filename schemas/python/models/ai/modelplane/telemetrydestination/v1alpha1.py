@@ -50,11 +50,6 @@ class SecretRef(BaseModel):
 
 
 class Spec(BaseModel):
-    collector: Literal['Composed', 'External'] | None = 'Composed'
-    """
-    Whether Modelplane runs the fleet collector. Composed (the default) puts one on the control plane, and every inference cluster exports to it. External composes none, for a platform that already operates one: each inference cluster then exports to the endpoint below directly.
-    External gives up the single egress point, one place to change the destination, and the control plane's own series reaching the fleet without a path of their own. Whoever imposed the endpoint has usually provided them already.
-    """
     crossplane: Crossplane | None = None
     """
     Configures how Crossplane will reconcile this composite resource
