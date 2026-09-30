@@ -156,6 +156,36 @@ def _scrape_configs() -> list[dict[str, Any]]:
             ],
         },
         {
+            "job_name": "modelplane-gpu",
+            "scrape_interval": _SCRAPE_INTERVAL,
+            "kubernetes_sd_configs": [{"role": "pod"}],
+            "relabel_configs": [
+                # A job of its own because nobody annotates DCGM for scraping
+                # and Modelplane doesn't install it: GKE runs a managed one in
+                # gke-managed-system, the NVIDIA GPU operator installs its own
+                # elsewhere, and the substrate job sees neither. Without this
+                # every modelplane_gpu_* series is empty on a cloud that
+                # provides its own - which is every cloud.
+                #
+                # Matched on the name rather than an exact label, because the
+                # two spell it differently: gke-managed-dcgm-exporter and
+                # dcgm-exporter. Both labels are read, since which one carries
+                # the name depends on who packaged it.
+                {
+                    "source_labels": [
+                        "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+                        "__meta_kubernetes_pod_label_app",
+                    ],
+                    "action": "keep",
+                    "regex": ".*dcgm.*",
+                },
+                {"source_labels": ["__meta_kubernetes_pod_container_port_name"], "action": "keep", "regex": "metrics"},
+                # The node, because a GPU series belongs to hardware rather
+                # than to a deployment. DCGM names the card itself.
+                {"source_labels": ["__meta_kubernetes_pod_node_name"], "target_label": "node"},
+            ],
+        },
+        {
             "job_name": "modelplane-substrate",
             "scrape_interval": _SUBSTRATE_INTERVAL,
             "kubernetes_sd_configs": [{"role": "pod"}],
