@@ -66,11 +66,43 @@ def _relabel_pod_identity() -> list[dict[str, Any]]:
     ] + [{"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"}]
 
 
+def _annotated_path() -> list[dict[str, Any]]:
+    """Take the metrics path from the pod's own annotation, where it sets one."""
+    return [
+        {
+            "source_labels": ["__meta_kubernetes_pod_annotation_prometheus_io_path"],
+            "action": "replace",
+            "target_label": "__metrics_path__",
+            "regex": "(.+)",
+        }
+    ]
+
+
+def _annotated_port() -> list[dict[str, Any]]:
+    """Take the port from the pod's own annotation, where it sets one.
+
+    Service discovery makes a target of every declared container port, so
+    without this a pod is scraped on whichever it declared first. Rewriting
+    them all to the annotated one leaves identical targets, which discovery
+    then collapses to one.
+    """
+    return [
+        {
+            "source_labels": ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"],
+            "action": "replace",
+            "target_label": "__address__",
+            "regex": r"([^:]+)(?::\d+)?;(\d+)",
+            "replacement": "$1:$2",
+        }
+    ]
+
+
 def _scrape_configs() -> list[dict[str, Any]]:
     """What to scrape on an inference cluster.
 
-    The gateway's GenAI metrics sit on the ext-proc sidecar's admin port rather
-    than the proxy's, so the front door needs a target of its own.
+    Three jobs over disjoint sets of pods, so nothing is scraped twice: the
+    engines Modelplane runs, the gateways in front of them, and everything else
+    the serving stack installs.
     """
     return [
         {
@@ -98,6 +130,11 @@ def _scrape_configs() -> list[dict[str, Any]]:
                     "regex": ".+",
                 },
                 {"source_labels": ["__meta_kubernetes_pod_container_port_name"], "action": "keep", "regex": "metrics"},
+                # Envoy publishes Prometheus on its admin port, not at
+                # /metrics, and says so in its own annotation. Without this the
+                # front door 404s every interval and the modelplane_frontend_*
+                # series - the ones an SLO is written against - never arrive.
+                *_annotated_path(),
             ],
         },
         {
@@ -110,6 +147,26 @@ def _scrape_configs() -> list[dict[str, Any]]:
                     "action": "keep",
                     "regex": "true",
                 },
+                # Both of these annotate themselves for scraping, and both have
+                # a job above that gives them their identity. Without the drops
+                # they are collected twice, under two job names.
+                {
+                    "source_labels": ["__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"],
+                    "action": "drop",
+                    "regex": ".+",
+                },
+                {
+                    "source_labels": [f"__meta_kubernetes_pod_label_{_SERVING_LABEL}"],
+                    "action": "drop",
+                    "regex": "true",
+                },
+                # The rest of the same convention, not just the first line of
+                # it. A pod that says scrape me generally also says where: the
+                # cert-manager webhook declares 10250 first and annotates 9402,
+                # so honouring only the keep scrapes its TLS port over plain
+                # HTTP and logs a 400 every interval.
+                *_annotated_path(),
+                *_annotated_port(),
                 {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
             ],
         },
@@ -118,12 +175,14 @@ def _scrape_configs() -> list[dict[str, Any]]:
 
 # What each source unit is worth in the base unit the target name claims.
 # Written as the expression rather than a factor so nothing has to render a
-# float: 1e-09 is not an OTTL literal.
+# float: 1e-09 is not an OTTL literal. Paths carry their context because the
+# collector rewrites bare ones and asks the author to stop; Modelplane is the
+# author here, so nobody's stored MetricMapping has to change.
 _UNIT_CONVERSION = {
-    "Millijoules": "value_double / 1000",
-    "Milliseconds": "value_double / 1000",
-    "Nanoseconds": "value_double / 1000000000",
-    "Mebibytes": "value_double * 1048576",
+    "Millijoules": "datapoint.value_double / 1000",
+    "Milliseconds": "datapoint.value_double / 1000",
+    "Nanoseconds": "datapoint.value_double / 1000000000",
+    "Mebibytes": "datapoint.value_double * 1048576",
 }
 
 
@@ -141,8 +200,8 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
         for m in mapping.spec.metrics:
             if m.fromUnit:
                 conversion = _UNIT_CONVERSION[m.fromUnit]
-                datapoint.append(f'set(value_double, {conversion}) where metric.name == "{m.from_}"')
-            metric.append(f'set(name, "{m.to}") where name == "{m.from_}"')
+                datapoint.append(f'set(datapoint.value_double, {conversion}) where metric.name == "{m.from_}"')
+            metric.append(f'set(metric.name, "{m.to}") where metric.name == "{m.from_}"')
     return datapoint, metric
 
 

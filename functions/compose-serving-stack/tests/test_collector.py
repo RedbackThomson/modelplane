@@ -134,6 +134,10 @@ class TestConfig(unittest.TestCase):
         blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
         metric_block = next(b for b in blocks if b["context"] == "metric")
         self.assertFalse([st for st in metric_block["statements"] if "value_double" in st])
+        for block in blocks:
+            for st in block["statements"]:
+                self.assertNotIn("set(name,", st)
+                self.assertNotIn("set(value_double,", st)
 
     def test_sglang_latency_histograms_are_not_renamed(self) -> None:
         """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""
