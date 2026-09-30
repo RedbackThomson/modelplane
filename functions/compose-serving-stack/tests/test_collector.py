@@ -78,6 +78,24 @@ class TestConfig(unittest.TestCase):
         attrs = _config()["processors"]["resource/cluster"]["attributes"]
         self.assertEqual(attrs, [{"key": "cluster", "value": "prod-us-east", "action": "upsert"}])
 
+    def test_the_jobs_cover_disjoint_pods(self) -> None:
+        """A pod two jobs both collect arrives twice, under two job names."""
+        jobs = {
+            j["job_name"]: j["relabel_configs"]
+            for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]
+        }
+        substrate = jobs["modelplane-substrate"]
+
+        def predicate(rules: list[dict], action: str) -> set[tuple]:
+            return {(tuple(r["source_labels"]), r["regex"]) for r in rules if r.get("action") == action}
+
+        # Everything another job keeps, the substrate job drops on the same terms.
+        for job in ("modelplane-engines", "modelplane-gateway", "modelplane-gpu"):
+            for kept in predicate(jobs[job], "keep"):
+                if kept[0] == ("__meta_kubernetes_pod_container_port_name",):
+                    continue  # a port filter, not a pod filter
+                self.assertIn(kept, predicate(substrate, "drop"), f"{job} keeps {kept}, substrate does not drop it")
+
     def test_engine_scrape_selects_the_port_by_name(self) -> None:
         """Matching by number would find the pd-sidecar on a disaggregated pod."""
         jobs = {j["job_name"]: j for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]}

@@ -76,6 +76,25 @@ def _relabel_pod_identity() -> list[dict[str, Any]]:
     ] + [{"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"}]
 
 
+def _dcgm_selector(action: str) -> dict[str, Any]:
+    """Match a GPU exporter, however it was packaged.
+
+    The two spell it differently - gke-managed-dcgm-exporter and dcgm-exporter -
+    and put the name on different labels depending on who packaged it, so both
+    are read and the match is on what they share. One definition, used by the
+    job that keeps them and the job that has to leave them alone, because the
+    two drifting apart is how a series gets collected twice.
+    """
+    return {
+        "source_labels": [
+            "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+            "__meta_kubernetes_pod_label_app",
+        ],
+        "action": action,
+        "regex": ".*dcgm.*",
+    }
+
+
 def _annotated_path() -> list[dict[str, Any]]:
     """Take the metrics path from the pod's own annotation, where it sets one."""
     return [
@@ -171,14 +190,7 @@ def _scrape_configs() -> list[dict[str, Any]]:
                 # two spell it differently: gke-managed-dcgm-exporter and
                 # dcgm-exporter. Both labels are read, since which one carries
                 # the name depends on who packaged it.
-                {
-                    "source_labels": [
-                        "__meta_kubernetes_pod_label_app_kubernetes_io_name",
-                        "__meta_kubernetes_pod_label_app",
-                    ],
-                    "action": "keep",
-                    "regex": ".*dcgm.*",
-                },
+                _dcgm_selector("keep"),
                 {"source_labels": ["__meta_kubernetes_pod_container_port_name"], "action": "keep", "regex": "metrics"},
                 # The node, because a GPU series belongs to hardware rather
                 # than to a deployment. DCGM names the card itself.
@@ -195,9 +207,10 @@ def _scrape_configs() -> list[dict[str, Any]]:
                     "action": "keep",
                     "regex": "true",
                 },
-                # Both of these annotate themselves for scraping, and both have
-                # a job above that gives them their identity. Without the drops
-                # they are collected twice, under two job names.
+                # Everything a job above already names. Each of these can
+                # annotate itself for scraping - the gateway does, and a
+                # GPU operator's DCGM usually does - and collecting one here
+                # as well would carry it twice under two job names.
                 {
                     "source_labels": ["__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"],
                     "action": "drop",
@@ -208,6 +221,7 @@ def _scrape_configs() -> list[dict[str, Any]]:
                     "action": "drop",
                     "regex": ".+",
                 },
+                _dcgm_selector("drop"),
                 # The rest of the same convention, not just the first line of
                 # it. A pod that says scrape me generally also says where: the
                 # cert-manager webhook declares 10250 first and annotates 9402,
@@ -268,6 +282,25 @@ def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
     return {"metric_statements": blocks}
 
 
+# Exporters that flatten a series into labels, losing anything held as a
+# resource attribute unless told otherwise. Modelplane's identity - the
+# cluster, deployment, engine and role a series belongs to - is all held there,
+# because that is what the merge across replicas groups on, so without this a
+# Prometheus backend receives every series stripped of everything that says
+# what it measures.
+#
+# Applied under an operator's own config rather than over it: this is a default,
+# and a sink that sets it wins.
+_SINK_DEFAULTS = {
+    "prometheusremotewrite": {"resource_to_telemetry_conversion": {"enabled": True}},
+    "prometheus": {"resource_to_telemetry_conversion": {"enabled": True}},
+}
+
+
+def _sink_defaults(exporter: str) -> dict[str, Any]:
+    return {k: dict(v) for k, v in _SINK_DEFAULTS.get(exporter, {}).items()}
+
+
 def _credential_path(sink: tdv1alpha1.Sink, key: str) -> str:
     return f"{_CREDENTIALS_DIR}/{sink.name}/{key}"
 
@@ -305,7 +338,7 @@ def exporters(sinks: list[tdv1alpha1.Sink]) -> dict[str, Any]:
     """
     rendered: dict[str, Any] = {}
     for sink in sinks:
-        cfg: dict[str, Any] = dict(sink.config or {})
+        cfg: dict[str, Any] = _sink_defaults(sink.type) | dict(sink.config or {})
         if sink.endpoint:
             cfg["endpoint"] = sink.endpoint
         if sink.auth and sink.auth.bearerTokenKey:
