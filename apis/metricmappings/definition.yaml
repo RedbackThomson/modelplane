@@ -84,9 +84,9 @@ spec:
                       description: >-
                         How this metric combines over a deployment's replicas.
 
-                        Each replica publishes its own series, told apart by
-                        the replica label, and a query over a deployment
-                        combines them. This says which combination is the right
+                        Every pod publishes its own series, told apart by the
+                        replica it belongs to and the instance it was scraped
+                        from, and a query over a deployment combines them. This says which combination is the right
                         one: Sum for anything counted - requests, tokens,
                         joules, a queue's depth. Mean for a ratio, where
                         summing reads two replicas at half capacity as one at

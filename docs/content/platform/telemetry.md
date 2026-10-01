@@ -19,8 +19,9 @@ deployments change.
 
 ## What you get
 
-Every series carries `cluster`. A series about a deployment also carries `deployment`,
-`replica`, `namespace`, `engine`, and `role`.
+Every series carries `cluster`, and `job` and `instance` naming the target it was scraped
+from. A series about a deployment also carries `deployment`, `replica`, `namespace`,
+`engine`, and `role`.
 
 Each replica publishes its own series. Combine them in the query, the way the metric's
 `acrossReplicas` says: `sum by (deployment)` for anything counted, `avg by (deployment)`
@@ -28,8 +29,13 @@ for a ratio, `max by (deployment)` for a saturation figure an alert fires on. Th
 collector doesn't add them up for you, because a scrape of one replica is one batch, and
 adding readings taken at different moments is not the traffic that happened.
 
-The replica is an index, not a pod. It's bounded by the replica count and it survives a
-restart and a rolling update, so the series count doesn't grow every time you deploy.
+The replica is an index rather than a pod, so it is bounded by the replica count and
+survives a restart and a rolling update. Group by it, not by `instance`.
+
+`instance` is the pod's address, and it is there because two pods writing one series is one
+series with one of them lost - a deployment running several pods per replica, or two
+gateway pods, have nothing else to tell them apart. It does turn over on a rolling update,
+so a query that groups by it grows a series every time you deploy. Aggregate it away.
 
 Some of what you can read:
 
@@ -248,9 +254,9 @@ against Modelplane's Prometheus stops being read by anything, because the operat
 the stack.
 
 **Rewrite your dashboard queries.** Names change, and so do the labels: group by
-`deployment` rather than `model_name`, there's no pod label, and every series carries
-`cluster` and `replica`. A panel that showed one engine now shows one replica, so wrap it
-in `sum by (deployment)` or the aggregation that metric's `acrossReplicas` names.
+`deployment` rather than `model_name`, and every series carries `cluster`, `replica`, and
+the `instance` it was scraped from. A panel that showed one engine now shows one pod, so
+wrap it in `sum by (deployment)` or the aggregation that metric's `acrossReplicas` names.
 
 | Was | Is |
 | --- | --- |
