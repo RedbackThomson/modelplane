@@ -14,6 +14,7 @@
 
 """Tests for the collector this stack composes."""
 
+import re
 import typing
 import unittest
 
@@ -41,7 +42,7 @@ _SINKS = [_sink()]
 
 
 def _metric_statements() -> list[str]:
-    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[1]
+    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[2]
 
 
 def _config(*, extensions: dict | None = None) -> dict:
@@ -120,6 +121,69 @@ class TestConfig(unittest.TestCase):
         cfg = _config()
         self.assertEqual(cfg["processors"]["groupbyattrs/identity"]["keys"], list(collector._IDENTITY))
         self.assertIn("groupbyattrs/identity", cfg["service"]["pipelines"]["metrics"]["processors"])
+
+    def test_a_part_is_extracted_before_anything_selects_on_it(self) -> None:
+        """A label or a unit for an extracted part names a metric that must exist.
+
+        The extraction mints `<name>_count`, and a datapoint statement for it
+        selects on that name. Run the datapoint block first and it matches
+        nothing, silently.
+        """
+        mapping = mmv1alpha1.MetricMapping.model_validate(
+            {
+                "spec": {
+                    "metrics": [
+                        {
+                            "from": "my_engine_duration_ms",
+                            "to": "modelplane_requests_total",
+                            "acrossReplicas": "Sum",
+                            "part": "Count",
+                            "fromUnit": "Milliseconds",
+                            "labels": [{"name": "status", "value": "ok"}],
+                        }
+                    ]
+                }
+            }
+        )
+        blocks = collector._transform([mapping])["metric_statements"]
+        contexts = [b["context"] for b in blocks]
+        self.assertEqual(contexts, ["metric", "datapoint", "metric"])
+        self.assertIn("extract_count_metric", blocks[0]["statements"][0])
+        # Everything selecting on the extracted name comes after the extraction.
+        for statement in blocks[1]["statements"]:
+            self.assertIn("my_engine_duration_ms_count", statement)
+
+    def test_every_job_carries_something_unique_to_its_target(self) -> None:
+        """Two producers whose series are identical are one series, and one is lost.
+
+        The modelplane identity names an engine and nothing else: a gateway pod
+        carries none of it, two replicas of a substrate controller share a
+        namespace, and a ModelReplica with copies > 1 runs several pods under
+        one replica index.
+        """
+        self.assertIn("service.instance.id", collector._IDENTITY)
+        statement = _config()["processors"]["transform/identity"]["metric_statements"][0]["statements"][0]
+        self.assertIn('"service.instance.id"', statement)
+
+    def test_a_scrape_spike_cannot_take_the_collector_down(self) -> None:
+        """Nothing bounds what one interval brings off a fleet of engines."""
+        cfg = _config()
+        self.assertIn("memory_limiter", cfg["processors"])
+        self.assertEqual(cfg["service"]["pipelines"]["metrics"]["processors"][0], "memory_limiter")
+
+    def test_the_port_rewrite_matches_an_ipv6_pod(self) -> None:
+        """__address__ is [2001:db8::1]:9090 there, which [^:]+ never matches."""
+        rule = next(
+            r
+            for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]
+            if j["job_name"] == "modelplane-substrate"
+            for r in j["relabel_configs"]
+            if r.get("target_label") == "__address__"
+        )
+        for address in ("10.1.0.5:8000", "[2001:db8::1]:9090"):
+            matched = re.fullmatch(rule["regex"], f"{address};9402")
+            assert matched is not None, address
+            self.assertTrue(matched.expand(r"\1:\2").endswith(":9402"))
 
     def test_engine_scrape_selects_the_port_by_name(self) -> None:
         """Matching by number would find the pd-sidecar on a disaggregated pod."""

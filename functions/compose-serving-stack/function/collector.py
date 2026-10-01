@@ -63,7 +63,31 @@ _GENAI_PORT = "aigw-admin"
 # node is here for the GPU job, whose series belong to hardware rather than to
 # a deployment; an engine's series carry no node, which is what lets replicas on
 # different nodes merge.
-_IDENTITY = ("cluster", "namespace", "deployment", "replica", "engine", "role", "node")
+_IDENTITY = (
+    "cluster",
+    "namespace",
+    "deployment",
+    "replica",
+    "engine",
+    "role",
+    "node",
+    # What the scrape came from, as the Prometheus receiver names it, which an
+    # exporter renders as job and instance.
+    #
+    # Kept because a series has to be unique to whatever produced it or one
+    # producer's numbers silently replace another's. The identity above covers
+    # an engine; it covers nothing else. Two gateway pods carry no identity at
+    # all, two replicas of a substrate controller share a namespace, and a
+    # ModelReplica with copies greater than one runs several pods under one
+    # replica index. Each of those is a collision, and a collision is a wrong
+    # number that looks right.
+    #
+    # It is the pod's address, so it does churn on a rolling update, which is
+    # the cost. Aggregate it away in the query: the identity above is what to
+    # group by, and `acrossReplicas` names how.
+    "service.name",
+    "service.instance.id",
+)
 
 # OTTL quotes strings with double quotes; a Python list renders single ones and
 # the collector refuses to start on it.
@@ -139,7 +163,10 @@ def _annotated_port() -> list[dict[str, Any]]:
             "source_labels": ["__address__", "__meta_kubernetes_pod_annotation_prometheus_io_port"],
             "action": "replace",
             "target_label": "__address__",
-            "regex": r"([^:]+)(?::\d+)?;(\d+)",
+            # A bracketed IPv6 host or a bare one: [^:]+ alone never matches
+            # [2001:db8::1]:9090, so an IPv6 pod would keep whichever port
+            # discovery happened to pick.
+            "regex": r"(\[.+\]|[^:]+)(?::\d+)?;(\d+)",
             "replacement": "$1:$2",
         }
     ]
@@ -302,7 +329,7 @@ _UNIT_CONVERSION = {
 }
 
 
-def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], list[str]]:
+def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], list[str], list[str]]:
     """Compile the mappings to OTTL, as (datapoint, metric) statements.
 
     OTTL is rendered here rather than written in a MetricMapping so the kind
@@ -310,17 +337,20 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
     configuration language stays Modelplane's problem. It is also the only
     place that knows a unit conversion has to run somewhere a rename cannot.
     """
+    extract: list[str] = []
     datapoint: list[str] = []
     metric: list[str] = []
     for mapping in mappings:
         for m in mapping.spec.metrics:
             source = m.from_
             if m.part:
-                # Lift the part out first, under the name the extraction gives
-                # it, and rename that. The histogram carries on untouched.
-                suffix = _PART_SUFFIX[m.part]
-                metric.append(f'{_PART_FUNCTION[m.part]} where metric.name == "{source}"')
-                source = f"{source}{suffix}"
+                # In a block of its own, ahead of the datapoint statements. The
+                # extraction mints a new metric, and a label or a unit
+                # conversion for it selects on the name that extraction gives
+                # it - a name that does not exist until the extraction has run.
+                # The histogram carries on untouched.
+                extract.append(f'{_PART_FUNCTION[m.part]} where metric.name == "{source}"')
+                source = f"{source}{_PART_SUFFIX[m.part]}"
             if m.fromUnit:
                 conversion = _UNIT_CONVERSION[m.fromUnit]
                 datapoint.append(f'set(datapoint.value_double, {conversion}) where metric.name == "{source}"')
@@ -329,7 +359,7 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
             # one name and a statement could no longer tell them apart.
             datapoint.extend(_label_statements(source, m.labels or []))
             metric.append(f'set(metric.name, "{m.to}") where metric.name == "{source}"')
-    return datapoint, metric
+    return extract, datapoint, metric
 
 
 def _label_statements(source: str, labels: list[Any]) -> list[str]:
@@ -360,10 +390,13 @@ def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
     every datapoint before it starts the next, which is what keeps a rename
     from stranding the datapoints a conversion hasn't reached yet.
     """
-    datapoint, metric = statements(mappings)
-    blocks = [{"context": "metric", "statements": metric}]
+    extract, datapoint, metric = statements(mappings)
+    blocks: list[dict[str, Any]] = []
+    if extract:
+        blocks.append({"context": "metric", "statements": extract})
     if datapoint:
-        blocks.insert(0, {"context": "datapoint", "statements": datapoint})
+        blocks.append({"context": "datapoint", "statements": datapoint})
+    blocks.append({"context": "metric", "statements": metric})
     return {"metric_statements": blocks}
 
 
@@ -449,6 +482,11 @@ def config(
     # anything, but not replace the one composed for a sink's own auth block.
     extensions = {**extensions, **authenticators(sinks)}
     processors: dict[str, Any] = {
+        # First in the pipeline, so it refuses work before anything allocates
+        # for it. Nothing bounds what one interval brings off a fleet of
+        # engines, and the kill that follows a spike takes the whole cluster's
+        # telemetry with it until the pod is back.
+        "memory_limiter": {"check_interval": "1s", "limit_percentage": 80, "spike_limit_percentage": 25},
         # cluster is stamped here rather than downstream: one receiver on the
         # control plane sees a merged stream and cannot tell senders apart.
         "resource/cluster": {"attributes": [{"key": "cluster", "value": cluster, "action": "upsert"}]},
@@ -489,6 +527,7 @@ def config(
         "batch": {"timeout": "10s"},
     }
     pipeline = [
+        "memory_limiter",
         "resource/cluster",
         "transform/identity",
         "transform/modelplane",
