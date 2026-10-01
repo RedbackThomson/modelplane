@@ -836,7 +836,7 @@ class Composer:
                 ),
             )
             return
-        # Selectorless and headless: cluster DNS answers with the EndpointSlice's
+        # Selectorless and headless: cluster DNS answers with the endpoint's
         # address directly, so Envoy connects to the load balancer rather than
         # hairpinning through a ClusterIP.
         resource.update(
@@ -866,6 +866,32 @@ class Composer:
                     "addressType": f"IPv{version}",
                     "ports": [{"name": "https", "port": _CLUSTER_GATEWAY_PORT}],
                     "endpoints": [{"addresses": [address], "conditions": {"ready": True}}],
+                },
+            ),
+        )
+        # The same address again, as the Endpoints this supersedes. kube-dns
+        # reads only that API and was never taught the EndpointSlice one, so on
+        # a cluster running it - which is every GKE cluster, where it is still
+        # the default - the name answers NXDOMAIN with the slice alone. Envoy
+        # then resolves no address for the backend and every cross-cluster
+        # request is refused with no healthy upstream.
+        #
+        # Deprecated since 1.33 and still the only thing kube-dns reads. It
+        # costs one object; getting it wrong costs every request to the cluster.
+        resource.update(
+            self.rsp.desired.resources[f"cluster-name-endpoints-{label}"],
+            _k8s_object(
+                self.pc,
+                {
+                    "apiVersion": "v1",
+                    "kind": "Endpoints",
+                    "metadata": {"name": label, "namespace": REMOTE_NAMESPACE},
+                    "subsets": [
+                        {
+                            "addresses": [{"ip": address}],
+                            "ports": [{"name": "https", "port": _CLUSTER_GATEWAY_PORT}],
+                        }
+                    ],
                 },
             ),
         )

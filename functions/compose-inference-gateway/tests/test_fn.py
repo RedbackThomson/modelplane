@@ -773,8 +773,10 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
         compose-inference-cluster derived, and this gateway's Envoy resolves it,
         so its cluster needs a Service of that name. An IP is served by a
         headless Service and an EndpointSlice; a hostname, which is how a cloud
-        load balancer names itself, by an ExternalName Service. A cluster that
-        hasn't published both an address and a name gets neither.
+        load balancer names itself, by an ExternalName Service. An IP also gets
+        the Endpoints the slice supersedes, because kube-dns reads only that and
+        is what GKE runs. A cluster that hasn't published both an address and a
+        name gets neither.
         """
         ipv4 = "prod-ipv4-gateway-aaaaa.modelplane-system.svc.cluster.local"
         ipv6 = "prod-ipv6-gateway-bbbbb.modelplane-system.svc.cluster.local"
@@ -814,6 +816,12 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                     "metadata": {"name": "prod-ipv4-gateway-aaaaa", "namespace": fn.REMOTE_NAMESPACE},
                     "spec": {"clusterIP": "None", "ports": [{"name": "https", "port": 443}]},
                 },
+                "cluster-name-endpoints-prod-ipv4-gateway-aaaaa": {
+                    "apiVersion": "v1",
+                    "kind": "Endpoints",
+                    "metadata": {"name": "prod-ipv4-gateway-aaaaa", "namespace": fn.REMOTE_NAMESPACE},
+                    "subsets": [{"addresses": [{"ip": "203.0.113.7"}], "ports": [{"name": "https", "port": 443}]}],
+                },
                 "cluster-name-slice-prod-ipv4-gateway-aaaaa": {
                     "apiVersion": "discovery.k8s.io/v1",
                     "kind": "EndpointSlice",
@@ -831,6 +839,12 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                     "kind": "Service",
                     "metadata": {"name": "prod-ipv6-gateway-bbbbb", "namespace": fn.REMOTE_NAMESPACE},
                     "spec": {"clusterIP": "None", "ports": [{"name": "https", "port": 443}]},
+                },
+                "cluster-name-endpoints-prod-ipv6-gateway-bbbbb": {
+                    "apiVersion": "v1",
+                    "kind": "Endpoints",
+                    "metadata": {"name": "prod-ipv6-gateway-bbbbb", "namespace": fn.REMOTE_NAMESPACE},
+                    "subsets": [{"addresses": [{"ip": "2001:db8::1"}], "ports": [{"name": "https", "port": 443}]}],
                 },
                 "cluster-name-slice-prod-ipv6-gateway-bbbbb": {
                     "apiVersion": "discovery.k8s.io/v1",
