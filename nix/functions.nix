@@ -103,13 +103,23 @@ let
           );
     };
 
-  etcPasswd = pkgs.writeTextDir "etc/passwd" ''
+  # Written into the image as files rather than carried in `contents`, which
+  # would place them as symlinks into the store. containerd opens /etc/passwd
+  # inside the unpacked image to resolve the user an image or pod asks to run
+  # as, and since 2.2.0 it refuses one whose target leaves the mount root -
+  # which an absolute /nix/store/... target does. Every function pod then fails
+  # to start with "openat etc/passwd: path escapes from parent", on any node
+  # new enough to carry that containerd. See #479.
+  etcFiles = ''
+    mkdir -p etc
+    cat > etc/passwd <<'PASSWD'
     root:x:0:0:root:/root:/sbin/nologin
     nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin
-  '';
-  etcGroup = pkgs.writeTextDir "etc/group" ''
+    PASSWD
+    cat > etc/group <<'GROUP'
     root:x:0:
     nonroot:x:65532:
+    GROUP
   '';
 
   # Host Python carrying the build backends our workspace packages declare
@@ -229,9 +239,8 @@ let
         python
         sitePackages
         targetPkgs.stdenv.cc.cc.lib # libstdc++.so.6, libgcc_s.so.1 for wheels
-        etcPasswd
-        etcGroup
       ];
+      extraCommands = etcFiles;
       config = {
         Entrypoint = [
           "${python}/bin/python${pythonVersion}"
