@@ -326,6 +326,7 @@ _UNIT_CONVERSION = {
     "Milliseconds": "datapoint.value_double / 1000",
     "Nanoseconds": "datapoint.value_double / 1000000000",
     "Mebibytes": "datapoint.value_double * 1048576",
+    "Percent": "datapoint.value_double / 100",
 }
 
 

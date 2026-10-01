@@ -227,6 +227,36 @@ class TestConfig(unittest.TestCase):
         literal = next(a for a in typing.get_args(annotation) if typing.get_origin(a) is typing.Literal)
         self.assertEqual(set(typing.get_args(literal)), set(collector._UNIT_CONVERSION))
 
+    def test_a_percentage_is_divided_into_a_ratio(self) -> None:
+        """A component counting 0 to 100 under a name that says a ratio is 100x out.
+
+        vLLM and SGLang both publish a fraction, so no built-in needs this, but
+        vLLM's is called kv_cache_usage_perc - the name is no guide, and an
+        engine that means it has to be able to say so.
+        """
+        mapping = mmv1alpha1.MetricMapping.model_validate(
+            {
+                "spec": {
+                    "metrics": [
+                        {
+                            "from": "my_engine_cache_percent",
+                            "to": "modelplane_kv_cache_utilization_ratio",
+                            "acrossReplicas": "Mean",
+                            "fromUnit": "Percent",
+                        }
+                    ]
+                }
+            }
+        )
+        _, datapoint, _ = collector.statements([mapping])
+        self.assertEqual(
+            datapoint,
+            [
+                "set(datapoint.value_double, datapoint.value_double / 100) "
+                'where metric.name == "my_engine_cache_percent"'
+            ],
+        )
+
     def test_a_metric_name_cannot_end_the_comparison_early(self) -> None:
         """A quote in `from` would rename whatever the rest of the line matched."""
         with self.assertRaises(ValidationError):

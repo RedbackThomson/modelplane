@@ -170,13 +170,19 @@ spec:
                               Only meaningful alongside `from`.
                     fromUnit:
                       type: string
-                      enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds]
+                      enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds, Percent]
                       description: >-
                         What the component measures this in, when that isn't
                         the unit the name claims. Modelplane converts to the
                         base unit: millijoules and milliseconds are divided by
-                        a thousand, nanoseconds by a billion, and mebibytes
-                        multiplied out to bytes.
+                        a thousand, nanoseconds by a billion, percent by a
+                        hundred, and mebibytes multiplied out to bytes.
+
+                        Percent is for a component that counts a saturation
+                        from nought to a hundred where the name says a ratio.
+                        Check rather than assume: vLLM publishes
+                        kv_cache_usage_perc and the value is a fraction, so a
+                        name is no guide.
 
                         Say it whenever the source disagrees with the target,
                         even where the factor looks obvious. A name ending in

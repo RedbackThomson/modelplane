@@ -68,7 +68,7 @@ class Metric(BaseModel):
     acrossReplicas: Literal['Sum', 'Mean', 'Max']
     """
     How this metric combines over a deployment's replicas.
-    Each replica publishes its own series, told apart by the replica label, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
+    Every pod publishes its own series, told apart by the replica it belongs to and the instance it was scraped from, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
     Modelplane does not combine them in the collector. A scrape of one replica is one batch, so a collector that added them up would be adding readings taken at different moments, and two readings of one cumulative counter sum to twice the traffic that happened. The backend holds every replica's series and combines them at query time, where the arithmetic is right.
     Required, with no default, because the wrong combination is silent: a deployment reports a number that looks entirely plausible.
     """
@@ -80,10 +80,12 @@ class Metric(BaseModel):
     Held to the characters a metric name can contain. The name is matched inside the collector's own query language, so a quote here would end the comparison early and rename whatever the rest of the line matched.
     """
     fromUnit: (
-        Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds'] | None
+        Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds', 'Percent']
+        | None
     ) = None
     """
-    What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, and mebibytes multiplied out to bytes.
+    What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, percent by a hundred, and mebibytes multiplied out to bytes.
+    Percent is for a component that counts a saturation from nought to a hundred where the name says a ratio. Check rather than assume: vLLM publishes kv_cache_usage_perc and the value is a fraction, so a name is no guide.
     Say it whenever the source disagrees with the target, even where the factor looks obvious. A name ending in _bytes that holds mebibytes is the kind of thing nobody notices until a capacity review, and stating the source unit is what makes the conversion happen at all.
     """
     labels: list[Label] | None = Field(None, max_length=16)
