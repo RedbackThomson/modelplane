@@ -120,7 +120,47 @@ class Spec(BaseModel):
     """
 
 
+class Service(BaseModel):
+    endpoint: str | None = None
+    """
+    :
+
+    Where to reach the service, as host:port. The tunnel terminates TLS, so a
+    client connects over TLS and sends the host as SNI. What travels inside is
+    whatever the service speaks, which the tunnel does not interpret.
+    For example, "app-hy3wnb3wstpk7dz.tunnel.example.com:443".
+    """
+    name: str | None = None
+    """
+    :
+
+    Name of the service, as the agent announced it. 1-20 characters, lowercase
+    letters and digits only: the hostname joins the name to the tunnel id with
+    a dash, so a name may not contain one. For example, "app".
+    """
+
+
 class Status(BaseModel):
+    connectionState: str | None = None
+    """
+    :
+
+    Whether any agent is connected to the tunnel now.
+
+    #### Supported values
+
+    ConnectionState reports whether the tunnel has an agent behind it. Values are
+    prefixed because a top-level enum puts them in the package scope.
+    Possible values:
+
+    - `CONNECTION_STATE_UNSPECIFIED`:
+    Proto3 zero value. A read of the tunnel never returns it; a mutation
+    records it, because it reports the tunnel that was written.
+
+    - `CONNECTION_STATE_DISCONNECTED` - No agent is connected. Nothing the tunnel exposes is reachable.
+    - `CONNECTION_STATE_CONNECTED` - At least one agent is connected.
+    """
+    services: list[Service] | None = None
     state: str | None = None
     """
     :
@@ -155,6 +195,10 @@ class AtProvider(BaseModel):
     labels: dict[str, str] | None = None
     """
     Labels associated with the resource.
+    """
+    labelsAll: dict[str, str] | None = None
+    """
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
     """
     metadata: dict[str, Any] | None = None
     name: str | None = None
@@ -226,6 +270,13 @@ class StatusModel(BaseModel):
     conditions: list[Condition] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """

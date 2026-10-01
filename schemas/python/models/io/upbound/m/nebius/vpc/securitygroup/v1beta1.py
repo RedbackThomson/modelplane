@@ -240,6 +240,11 @@ class AtProvider(BaseModel):
     (Map of String) Labels associated with the resource.
     Labels associated with the resource.
     """
+    labelsAll: dict[str, str] | None = None
+    """
+    (Map of String) Effective labels sent to the API after merging provider default_labels with resource labels.
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
+    """
     metadata: dict[str, Any] | None = None
     """
     (Attributes) :
@@ -321,6 +326,13 @@ class StatusModel(BaseModel):
     conditions: list[Condition] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """

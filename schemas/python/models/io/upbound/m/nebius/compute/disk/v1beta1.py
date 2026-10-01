@@ -38,6 +38,58 @@ class SourceImageFamily(BaseModel):
     """
 
 
+class Policy(BaseModel):
+    resolution: Literal['Required', 'Optional'] | None = 'Required'
+    """
+    Resolution specifies whether resolution of this reference is required.
+    The default is 'Required', which means the reconcile will fail if the
+    reference cannot be resolved. 'Optional' means this reference will be
+    a no-op if it cannot be resolved.
+    """
+    resolve: Literal['Always', 'IfNotPresent'] | None = None
+    """
+    Resolve specifies when this reference should be resolved. The default
+    is 'IfNotPresent', which will attempt to resolve the reference only when
+    the corresponding field is not present. Use 'Always' to resolve the
+    reference on every reconcile.
+    """
+
+
+class SourceSnapshotIdRef(BaseModel):
+    name: str
+    """
+    Name of the referenced object.
+    """
+    namespace: str | None = None
+    """
+    Namespace of the referenced object
+    """
+    policy: Policy | None = None
+    """
+    Policies for referencing.
+    """
+
+
+class SourceSnapshotIdSelector(BaseModel):
+    matchControllerRef: bool | None = None
+    """
+    MatchControllerRef ensures an object with the same controller reference
+    as the selecting object is selected.
+    """
+    matchLabels: dict[str, str] | None = None
+    """
+    MatchLabels ensures an object with matching labels is selected.
+    """
+    namespace: str | None = None
+    """
+    Namespace for the selector
+    """
+    policy: Policy | None = None
+    """
+    Policies for selection.
+    """
+
+
 class ForProvider(BaseModel):
     blockSizeBytes: float | None = None
     """
@@ -98,12 +150,25 @@ class ForProvider(BaseModel):
     """
     sourceImageFamily: SourceImageFamily | None = None
     """
-    (Attributes) Cannot be set alongside source_image_id. (see below for nested schema)
+    (Attributes) Cannot be set alongside source_image_id or source_snapshot_id. (see below for nested schema)
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
-    *Cannot be set alongside source_image_family.*
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
+    *Cannot be set alongside source_image_family or source_snapshot_id.*
+    """
+    sourceSnapshotId: str | None = None
+    """
+    (String) Cannot be set alongside source_image_id or source_image_family.
+    *Cannot be set alongside source_image_id or source_image_family.*
+    """
+    sourceSnapshotIdRef: SourceSnapshotIdRef | None = None
+    """
+    Reference to a DiskSnapshot in compute to populate sourceSnapshotId.
+    """
+    sourceSnapshotIdSelector: SourceSnapshotIdSelector | None = None
+    """
+    Selector for a DiskSnapshot in compute to populate sourceSnapshotId.
     """
     type: str | None = None
     """
@@ -186,12 +251,25 @@ class InitProvider(BaseModel):
     """
     sourceImageFamily: SourceImageFamily | None = None
     """
-    (Attributes) Cannot be set alongside source_image_id. (see below for nested schema)
+    (Attributes) Cannot be set alongside source_image_id or source_snapshot_id. (see below for nested schema)
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
-    *Cannot be set alongside source_image_family.*
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
+    *Cannot be set alongside source_image_family or source_snapshot_id.*
+    """
+    sourceSnapshotId: str | None = None
+    """
+    (String) Cannot be set alongside source_image_id or source_image_family.
+    *Cannot be set alongside source_image_id or source_image_family.*
+    """
+    sourceSnapshotIdRef: SourceSnapshotIdRef | None = None
+    """
+    Reference to a DiskSnapshot in compute to populate sourceSnapshotId.
+    """
+    sourceSnapshotIdSelector: SourceSnapshotIdSelector | None = None
+    """
+    Selector for a DiskSnapshot in compute to populate sourceSnapshotId.
     """
     type: str | None = None
     """
@@ -285,6 +363,14 @@ class LockState(BaseModel):
     Disk is locked for deletion and for read-write operations while image is being created.
     Here is the list of these images.
     """
+    snapshots: list[str] | None = None
+    """
+    (List of String) :
+    :
+
+    Disk is locked only for deletion while snapshot is being created.
+    Here is the list of these snapshots.
+    """
 
 
 class Status(BaseModel):
@@ -346,7 +432,7 @@ class Status(BaseModel):
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
     """
     state: str | None = None
     """
@@ -408,6 +494,11 @@ class AtProvider(BaseModel):
     (Map of String) Labels associated with the resource.
     Labels associated with the resource.
     """
+    labelsAll: dict[str, str] | None = None
+    """
+    (Map of String) Effective labels sent to the API after merging provider default_labels with resource labels.
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
+    """
     metadata: dict[str, Any] | None = None
     """
     (Attributes) :
@@ -454,12 +545,17 @@ class AtProvider(BaseModel):
     """
     sourceImageFamily: SourceImageFamily | None = None
     """
-    (Attributes) Cannot be set alongside source_image_id. (see below for nested schema)
+    (Attributes) Cannot be set alongside source_image_id or source_snapshot_id. (see below for nested schema)
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
-    *Cannot be set alongside source_image_family.*
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
+    *Cannot be set alongside source_image_family or source_snapshot_id.*
+    """
+    sourceSnapshotId: str | None = None
+    """
+    (String) Cannot be set alongside source_image_id or source_image_family.
+    *Cannot be set alongside source_image_id or source_image_family.*
     """
     status: Status | None = None
     """
@@ -532,6 +628,13 @@ class StatusModel(BaseModel):
     conditions: list[Condition] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """

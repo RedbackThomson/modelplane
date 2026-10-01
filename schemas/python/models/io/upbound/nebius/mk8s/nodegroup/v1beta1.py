@@ -150,10 +150,16 @@ class Strategy(BaseModel):
 
     Maximum amount of time that the service will spend attempting to gracefully drain a node
     (evicting its pods) before falling back to pod deletion.
-    A value of 0 (or when field is omitted) means no timeout: the node can be drained for an unlimited time.
+    A value of 0 means no timeout: the node can be drained for an unlimited time.
     Important consequence of that is if PodDisruptionBudget doesn't allow evicting a pod,
     then NodeGroup update with node re-creation will hang on that pod eviction.
     Note that this is different from `kubectl drain --timeout`, which gives up and returns an error.
+
+    On 2026-08-01, defaults to 0.
+    IMPORTANT: starting from Q3 2026 new default is 10m;
+    for new clusters it will default to 10m,
+    node groups in existing clusters will be gradually migrated during Q3 to the default of 10m as well.
+    To get the actual value for your node group, please see 'strategy' in its status.
 
     Duration as a string: possibly signed sequence of decimal numbers, each with optional fraction and a unit suffix, such as `300ms`, `-1.5h` or `2h45m`. Valid time units are `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`, `d`.
     """
@@ -167,10 +173,29 @@ class Strategy(BaseModel):
     """
 
 
+class DiskEncryption(BaseModel):
+    type: str | None = None
+    """
+    (String) :
+    :
+
+    #### Supported values
+
+    Possible values:
+
+    - `DISK_ENCRYPTION_UNSPECIFIED`
+    - `DISK_ENCRYPTION_MANAGED`
+    """
+
+
 class BootDisk(BaseModel):
     blockSizeBytes: float | None = None
     """
     (Number)
+    """
+    diskEncryption: DiskEncryption | None = None
+    """
+    (Attributes) (see below for nested schema)
     """
     sizeBytes: float | None = None
     """
@@ -307,20 +332,36 @@ class GpuCluster(BaseModel):
 
 
 class GpuSettings(BaseModel):
+    dra: bool | None = None
+    """
+    (Boolean) :
+    :
+
+    Enables Dynamic Resource Allocation for this GPU node group.
+    For nodes whose image contains preinstalled NVIDIA drivers, disables the legacy NVIDIA device plugin.
+    For GPU nodes attached to a Compute GPU cluster, advertises RDMA capability through the managed DRANet DaemonSet.
+    """
     driversPreset: str | None = None
     """
-    : ""
+    (String) :
     :
 
     Identifier of the predefined set of drivers included in the ComputeImage deployed on ComputeInstances that are part of the NodeGroup.
-    Supported presets for different platform / Kubernetes version combinations:
-    * `gpu-l40s-a`, `gpu-l40s-d`, `gpu-h100-sxm`, `gpu-h200-sxm`:
-    * `version`: 1.30 → `"cuda12"` (CUDA 12.4)
-    * `version`: 1.31 → `"cuda12"` (CUDA 12.4), `"cuda12.4"`, `"cuda12.8"`
-    * `gpu-b200-sxm`:
-    * `version`: 1.31 → `"cuda12"` (CUDA 12.8), `"cuda12.8"`
-    * `gpu-b200-sxm-a`:
-    * `version`: 1.31 → `"cuda12.8"`
+    Supported presets depend on the platform and Kubernetes version.
+    To get the up-to-date list of supported presets for a given Kubernetes version and platform, run:
+    nebius mk8s node-group get-compatibility-matrix --cluster-kubernetes-version VERSION --platform PLATFORM
+    Leave empty for GPU nodes that do not have preinstalled drivers, including DRA-enabled node groups.
+    """
+
+
+class InstanceMetadata(BaseModel):
+    labels: dict[str, str] | None = None
+    """
+    (Map of String) Labels associated with the resource.
+    :
+
+    Labels propagated into Compute Instance metadata.
+    Provider-managed labels take precedence over user-provided instance labels.
     """
 
 
@@ -568,6 +609,22 @@ class ServiceAccountIdSelector(BaseModel):
     """
 
 
+class SpotPricingPolicy(BaseModel):
+    id: str | None = None
+    """
+    (String) Identifier for the resource, unique for its resource type.
+    PricingPolicy ID used as the maximum agreed price for the preemptible VM.
+    """
+    idRef: IdRef | None = None
+    """
+    Reference to a PricingPolicy in billing to populate id.
+    """
+    idSelector: IdSelector | None = None
+    """
+    Selector for a PricingPolicy in billing to populate id.
+    """
+
+
 class Taint(BaseModel):
     effect: str | None = None
     """
@@ -610,6 +667,10 @@ class Template(BaseModel):
     """
     (Attributes List) :
     """
+    followsSpotPrice: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     gpuCluster: GpuCluster | None = None
     """
     (Attributes) Nebius Compute GPUCluster ID that will be attached to node. (see below for nested schema)
@@ -617,6 +678,10 @@ class Template(BaseModel):
     gpuSettings: GpuSettings | None = None
     """
     (Attributes) :
+    """
+    instanceMetadata: InstanceMetadata | None = None
+    """
+    (Attributes) Metadata propagated to the Compute Instances in the NodeGroup. (see below for nested schema)
     """
     localDisks: LocalDisks | None = None
     """
@@ -644,36 +709,19 @@ class Template(BaseModel):
     """
     (Attributes) NVLinkSpec configures NVLink settings for the NodeGroup. (see below for nested schema)
     """
+    onDemand: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     os: str | None = None
     """
     (String) :
     :
 
     OS version that will be used to create the boot disk of Compute Instances in the NodeGroup.
-    Supported platform / Kubernetes version / OS / driver presets combinations
-    * `gpu-l40s-a`, `gpu-l40s-d`, `gpu-h100-sxm`, `gpu-h200-sxm`, `cpu-e1`, `cpu-e2`, `cpu-d3`:
-    * `drivers_preset`: `""`
-    * `version`: 1.30 → `"ubuntu22.04"`
-    * `version`: 1.31 → `"ubuntu22.04"` (default), `"ubuntu24.04"`
-    * `gpu-l40s-a`, `gpu-l40s-d`, `gpu-h100-sxm`, `gpu-h200-sxm`:
-    * `drivers_preset`: `"cuda12"` (CUDA 12.4)
-    * `version`: 1.30, 1.31 → `"ubuntu22.04"`
-    * `drivers_preset`: `"cuda12.4"`
-    * `version`: 1.31 → `"ubuntu22.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `gpu-b200-sxm`:
-    * `drivers_preset`: `""`
-    * `version`: 1.30, 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12"` (CUDA 12.8)
-    * `version`: 1.30, 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `gpu-b200-sxm-a`:
-    * `drivers_preset`: `""`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
+    Supported OS depend on the platform and Kubernetes version.
+    To get the up-to-date list of supported OS for a given Kubernetes version and platform, run:
+    nebius mk8s node-group get-compatibility-matrix --cluster-kubernetes-version VERSION --platform PLATFORM
     """
     preemptible: dict[str, Any] | None = None
     """
@@ -707,6 +755,10 @@ class Template(BaseModel):
     """
     Selector for a ServiceAccount in iam to populate serviceAccountId.
     """
+    spotPricingPolicy: SpotPricingPolicy | None = None
+    """
+    (Attributes) :
+    """
     taints: list[Taint] | None = None
     """
     (Attributes List) :
@@ -727,7 +779,7 @@ class ForProvider(BaseModel):
     (Number) :
     :
 
-    Number of nodes in the group. Can be changed manually at any time.
+    Number of nodes in the group. Can be changed manually at any time, except for a node group with NVLink.
 
     *Cannot be set alongside autoscaling.*
     """
@@ -791,7 +843,7 @@ class InitProvider(BaseModel):
     (Number) :
     :
 
-    Number of nodes in the group. Can be changed manually at any time.
+    Number of nodes in the group. Can be changed manually at any time, except for a node group with NVLink.
 
     *Cannot be set alongside autoscaling.*
     """
@@ -1101,6 +1153,14 @@ class NvlinkModel(BaseModel):
     """
 
 
+class SpotPricingPolicyModel(BaseModel):
+    id: str | None = None
+    """
+    (String) Identifier for the resource, unique for its resource type.
+    PricingPolicy ID used as the maximum agreed price for the preemptible VM.
+    """
+
+
 class TemplateModel(BaseModel):
     bootDisk: BootDisk | None = None
     """
@@ -1110,6 +1170,10 @@ class TemplateModel(BaseModel):
     """
     (Attributes List) :
     """
+    followsSpotPrice: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     gpuCluster: GpuClusterModel | None = None
     """
     (Attributes) Nebius Compute GPUCluster ID that will be attached to node. (see below for nested schema)
@@ -1117,6 +1181,10 @@ class TemplateModel(BaseModel):
     gpuSettings: GpuSettings | None = None
     """
     (Attributes) :
+    """
+    instanceMetadata: InstanceMetadata | None = None
+    """
+    (Attributes) Metadata propagated to the Compute Instances in the NodeGroup. (see below for nested schema)
     """
     localDisks: LocalDisks | None = None
     """
@@ -1144,36 +1212,19 @@ class TemplateModel(BaseModel):
     """
     (Attributes) NVLinkSpec configures NVLink settings for the NodeGroup. (see below for nested schema)
     """
+    onDemand: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     os: str | None = None
     """
     (String) :
     :
 
     OS version that will be used to create the boot disk of Compute Instances in the NodeGroup.
-    Supported platform / Kubernetes version / OS / driver presets combinations
-    * `gpu-l40s-a`, `gpu-l40s-d`, `gpu-h100-sxm`, `gpu-h200-sxm`, `cpu-e1`, `cpu-e2`, `cpu-d3`:
-    * `drivers_preset`: `""`
-    * `version`: 1.30 → `"ubuntu22.04"`
-    * `version`: 1.31 → `"ubuntu22.04"` (default), `"ubuntu24.04"`
-    * `gpu-l40s-a`, `gpu-l40s-d`, `gpu-h100-sxm`, `gpu-h200-sxm`:
-    * `drivers_preset`: `"cuda12"` (CUDA 12.4)
-    * `version`: 1.30, 1.31 → `"ubuntu22.04"`
-    * `drivers_preset`: `"cuda12.4"`
-    * `version`: 1.31 → `"ubuntu22.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `gpu-b200-sxm`:
-    * `drivers_preset`: `""`
-    * `version`: 1.30, 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12"` (CUDA 12.8)
-    * `version`: 1.30, 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `gpu-b200-sxm-a`:
-    * `drivers_preset`: `""`
-    * `version`: 1.31 → `"ubuntu24.04"`
-    * `drivers_preset`: `"cuda12.8"`
-    * `version`: 1.31 → `"ubuntu24.04"`
+    Supported OS depend on the platform and Kubernetes version.
+    To get the up-to-date list of supported OS for a given Kubernetes version and platform, run:
+    nebius mk8s node-group get-compatibility-matrix --cluster-kubernetes-version VERSION --platform PLATFORM
     """
     preemptible: dict[str, Any] | None = None
     """
@@ -1198,6 +1249,10 @@ class TemplateModel(BaseModel):
     This service account is also used to make requests to container registry.
 
     `resource.serviceaccount.issueAccessToken` permission is required to use this field.
+    """
+    spotPricingPolicy: SpotPricingPolicyModel | None = None
+    """
+    (Attributes) :
     """
     taints: list[Taint] | None = None
     """
@@ -1228,7 +1283,7 @@ class AtProvider(BaseModel):
     (Number) :
     :
 
-    Number of nodes in the group. Can be changed manually at any time.
+    Number of nodes in the group. Can be changed manually at any time, except for a node group with NVLink.
 
     *Cannot be set alongside autoscaling.*
     """
@@ -1240,6 +1295,11 @@ class AtProvider(BaseModel):
     """
     (Map of String) Labels associated with the resource.
     Labels associated with the resource.
+    """
+    labelsAll: dict[str, str] | None = None
+    """
+    (Map of String) Effective labels sent to the API after merging provider default_labels with resource labels.
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
     """
     metadata: dict[str, Any] | None = None
     """
@@ -1334,6 +1394,13 @@ class StatusModel(BaseModel):
     conditions: list[ConditionModel] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """
