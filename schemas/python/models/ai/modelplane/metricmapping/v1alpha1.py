@@ -43,6 +43,12 @@ class Crossplane(BaseModel):
 
 
 class Metric(BaseModel):
+    acrossReplicas: Literal['Sum', 'Mean', 'Max']
+    """
+    How a deployment's replicas combine into one series. Every replica reports this metric for itself, and what leaves the cluster is one series for the deployment, so something has to say what the deployment's value is.
+    Sum for anything counted: requests, tokens, joules, a queue's depth. Mean for a ratio, where summing would read two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where the mean hides the replica that is actually in trouble.
+    Required, with no default, because the wrong answer here is silent: a deployment reports a number that looks entirely plausible and is one replica's. A histogram can only be summed, which merges its buckets.
+    """
     from_: constr(pattern=r'^[a-zA-Z_:][a-zA-Z0-9_:]*$', max_length=255) = Field(
         ..., alias='from'
     )

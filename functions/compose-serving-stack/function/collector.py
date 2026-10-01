@@ -51,6 +51,11 @@ _DEPLOYMENT_LABEL = "modelplane_ai_deployment"
 # disaggregated pod, which would answer and serve the wrong thing.
 _METRICS_PORT = "http"
 
+# The port the AI gateway's ext-proc sidecar serves its own metrics on, which
+# is where the GenAI semantic-convention series live. Envoy's admin port
+# carries Envoy's own statistics and none of these.
+_GENAI_PORT = "aigw-admin"
+
 # What a series is attributed to, and the only resource attributes that survive
 # to the exporter. The merge across replicas groups on exactly these, so a
 # series differing in nothing else is one series.
@@ -58,7 +63,7 @@ _METRICS_PORT = "http"
 # node is here for the GPU job, whose series belong to hardware rather than to
 # a deployment; an engine's series carry no node, which is what lets replicas on
 # different nodes merge.
-_IDENTITY = ("cluster", "namespace", "deployment", "engine", "role", "node")
+_IDENTITY = ("cluster", "namespace", "deployment", "replica", "engine", "role", "node")
 
 # OTTL quotes strings with double quotes; a Python list renders single ones and
 # the collector refuses to start on it.
@@ -83,6 +88,7 @@ def _relabel_pod_identity() -> list[dict[str, Any]]:
         {"source_labels": [f"__meta_kubernetes_pod_label_{src}"], "target_label": dst}
         for src, dst in (
             ("modelplane_ai_deployment", "deployment"),
+            ("modelplane_ai_replica", "replica"),
             ("modelplane_ai_engine", "engine"),
             ("modelplane_ai_role", "role"),
         )
@@ -142,9 +148,13 @@ def _annotated_port() -> list[dict[str, Any]]:
 def _scrape_configs() -> list[dict[str, Any]]:
     """What to scrape on an inference cluster.
 
-    Three jobs over disjoint sets of pods, so nothing is scraped twice: the
-    engines Modelplane runs, the gateways in front of them, and everything else
-    the serving stack installs.
+    Jobs over disjoint sets of pods, so nothing is scraped twice: the engines
+    Modelplane runs, the gateways in front of them, the GPU exporter the
+    cluster came with, and everything else the serving stack installs.
+
+    The front door needs two of them. Envoy publishes its own statistics on its
+    admin port, and the GenAI metrics a caller's experience is measured by come
+    from the AI gateway's ext-proc on a different port, at a different path.
     """
     return [
         {
@@ -185,6 +195,32 @@ def _scrape_configs() -> list[dict[str, Any]]:
                 # front door 404s every interval and the modelplane_frontend_*
                 # series - the ones an SLO is written against - never arrive.
                 *_annotated_path(),
+            ],
+        },
+        {
+            # The GenAI metrics, which are the SLO ones: what a caller waited,
+            # measured the same way whatever engine served it.
+            #
+            # They come from the AI gateway's ext-proc, not from the proxy. It
+            # runs as a native sidecar - an initContainer with restartPolicy
+            # Always - so it is easy to miss when reading the pod, and it
+            # serves its own admin port rather than Envoy's. A job of its own
+            # because the two ports want different paths: the proxy publishes
+            # at the path its annotation names, the ext-proc at /metrics.
+            "job_name": "modelplane-gateway-genai",
+            "scrape_interval": _SCRAPE_INTERVAL,
+            "kubernetes_sd_configs": [{"role": "pod"}],
+            "relabel_configs": [
+                {
+                    "source_labels": ["__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"],
+                    "action": "keep",
+                    "regex": ".+",
+                },
+                {
+                    "source_labels": ["__meta_kubernetes_pod_container_port_name"],
+                    "action": "keep",
+                    "regex": _GENAI_PORT,
+                },
             ],
         },
         {
@@ -400,9 +436,14 @@ def config(
             ]
         },
         "transform/modelplane": _transform(mappings),
-        # A pod's identity is a resource attribute, where a metric processor
-        # cannot reach it. Strip and merge the resources first, or the
-        # aggregation below combines nothing.
+        # Lifts the identity onto the resource, where an exporter that flattens
+        # a series into labels will find it. It does not merge a deployment's
+        # replicas: each is scraped separately, so each is its own batch, and
+        # there is never more than one replica here to merge. They stay
+        # separate series, told apart by the replica label, and a query over
+        # the deployment combines them - which is the only place the
+        # arithmetic can be right, because adding two cumulative readings
+        # taken at different moments is not the traffic that happened.
         "groupbyattrs/replicas": {"keys": list(_IDENTITY)},
         "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
         "batch": {"timeout": "10s"},

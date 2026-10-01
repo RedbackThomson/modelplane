@@ -252,8 +252,13 @@ LABEL_WORKLOAD = "modelplane.ai/workload"
 # merged across replicas keeps the identity all of them share. Metrics are the
 # only reason these exist; nothing selects on them.
 LABEL_DEPLOYMENT = "modelplane.ai/deployment"
+LABEL_REPLICA = "modelplane.ai/replica"
 LABEL_ENGINE = "modelplane.ai/engine"
 LABEL_ROLE = "modelplane.ai/role"
+
+
+# Set on the ModelReplica by the composite that scheduled it.
+_LABEL_REPLICA_INDEX = "modelplane.ai/replica-index"
 
 
 def telemetry_labels(
@@ -269,9 +274,16 @@ def telemetry_labels(
     label value can't.
     """
     labels: dict[str, str] = {}
-    deployment = (replica.metadata.labels if replica.metadata else None) or {}
-    if name := deployment.get(LABEL_DEPLOYMENT):
+    own = (replica.metadata.labels if replica.metadata else None) or {}
+    if name := own.get(LABEL_DEPLOYMENT):
         labels[LABEL_DEPLOYMENT] = name
+    # Which replica of that deployment. Two replicas reporting the same metric
+    # need something to tell them apart or they are one series downstream and
+    # one of them is simply lost. The index rather than the pod: it is bounded
+    # by the replica count, and it survives a restart and a rolling update,
+    # where a pod name is minted afresh each time.
+    if index := own.get(_LABEL_REPLICA_INDEX):
+        labels[LABEL_REPLICA] = index
     if engine.name:
         labels[LABEL_ENGINE] = engine.name
     if member.role:

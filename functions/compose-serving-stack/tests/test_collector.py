@@ -152,10 +152,14 @@ class TestConfig(unittest.TestCase):
     def test_a_metric_name_cannot_end_the_comparison_early(self) -> None:
         """A quote in `from` would rename whatever the rest of the line matched."""
         with self.assertRaises(ValidationError):
-            mmv1alpha1.Metric.model_validate({"from": 'x" or true or name == "y', "to": "modelplane_x"})
+            mmv1alpha1.Metric.model_validate(
+                {"from": 'x" or true or name == "y', "to": "modelplane_x", "acrossReplicas": "Sum"}
+            )
         for mapping in stacks.BUILTIN_MAPPINGS:
             for m in mapping.spec.metrics:
-                round_tripped = mmv1alpha1.Metric.model_validate({"from": m.from_, "to": m.to})
+                round_tripped = mmv1alpha1.Metric.model_validate(
+                    {"from": m.from_, "to": m.to, "acrossReplicas": m.acrossReplicas}
+                )
                 self.assertEqual(round_tripped.from_, m.from_)
 
     def test_a_value_rewrite_never_lands_in_the_metric_context(self) -> None:
