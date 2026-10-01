@@ -59,13 +59,14 @@ class TestConfig(unittest.TestCase):
     """The collector configuration this renders."""
 
     def test_pipeline_order(self) -> None:
-        """groupbyattrs runs before the merge, or the merge combines nothing.
+        """The rename runs before the identity is lifted onto the resource.
 
-        A pod's identity is a resource attribute, which a metric processor
-        can't see, so the resources have to be stripped and merged first.
+        Discovery writes the identity onto each datapoint and groupbyattrs
+        lifts it; a statement matching on a metric's name has to run while the
+        datapoints are still where the rename can reach them.
         """
         procs = _config()["service"]["pipelines"]["metrics"]["processors"]
-        self.assertLess(procs.index("transform/modelplane"), procs.index("groupbyattrs/replicas"))
+        self.assertLess(procs.index("transform/modelplane"), procs.index("groupbyattrs/identity"))
         self.assertEqual(procs[-1], "batch")
 
     def test_only_modelplane_leaves_the_cluster(self) -> None:
@@ -105,7 +106,20 @@ class TestConfig(unittest.TestCase):
         self.assertNotIn("'", statement)
         self.assertIn('keep_keys(resource.attributes, ["cluster"', statement)
         pipeline = _config()["service"]["pipelines"]["metrics"]["processors"]
-        self.assertLess(pipeline.index("transform/identity"), pipeline.index("groupbyattrs/replicas"))
+        self.assertLess(pipeline.index("transform/identity"), pipeline.index("groupbyattrs/identity"))
+
+    def test_the_identity_is_lifted_onto_the_resource(self) -> None:
+        """Without this a series arrives carrying only the cluster.
+
+        Discovery writes the identity onto each datapoint. An exporter that
+        flattens a series into labels reads the resource, so something has to
+        move it, and this is the only processor that does. Removing it as a
+        no-op strips every series of what says who it belongs to - verified on
+        a cluster, where the resource came back carrying `cluster` alone.
+        """
+        cfg = _config()
+        self.assertEqual(cfg["processors"]["groupbyattrs/identity"]["keys"], list(collector._IDENTITY))
+        self.assertIn("groupbyattrs/identity", cfg["service"]["pipelines"]["metrics"]["processors"])
 
     def test_engine_scrape_selects_the_port_by_name(self) -> None:
         """Matching by number would find the pd-sidecar on a disaggregated pod."""

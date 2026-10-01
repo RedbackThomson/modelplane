@@ -472,15 +472,19 @@ def config(
             ]
         },
         "transform/modelplane": _transform(mappings),
-        # Lifts the identity onto the resource, where an exporter that flattens
-        # a series into labels will find it. It does not merge a deployment's
-        # replicas: each is scraped separately, so each is its own batch, and
-        # there is never more than one replica here to merge. They stay
-        # separate series, told apart by the replica label, and a query over
-        # the deployment combines them - which is the only place the
-        # arithmetic can be right, because adding two cumulative readings
-        # taken at different moments is not the traffic that happened.
-        "groupbyattrs/replicas": {"keys": list(_IDENTITY)},
+        # Discovery writes the identity onto each datapoint; this lifts it onto
+        # the resource, which is where an exporter that flattens a series into
+        # labels looks for it. Without it a series arrives carrying only the
+        # cluster.
+        #
+        # It does not merge a deployment's replicas, whatever its name
+        # suggests. Each replica is scraped separately, so each is its own
+        # batch, and there is never a second replica here to merge with. They
+        # stay separate series, told apart by the replica label, and a query
+        # over the deployment combines them - which is the only place the
+        # arithmetic can be right, because adding two cumulative readings taken
+        # at different moments is not the traffic that happened.
+        "groupbyattrs/identity": {"keys": list(_IDENTITY)},
         "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
         "batch": {"timeout": "10s"},
     }
@@ -488,7 +492,7 @@ def config(
         "resource/cluster",
         "transform/identity",
         "transform/modelplane",
-        "groupbyattrs/replicas",
+        "groupbyattrs/identity",
         "filter/modelplane",
         "batch",
     ]
