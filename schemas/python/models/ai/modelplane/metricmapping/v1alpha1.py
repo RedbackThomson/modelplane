@@ -42,12 +42,35 @@ class Crossplane(BaseModel):
     resourceRefs: list[ResourceRef] | None = None
 
 
+class Label(BaseModel):
+    from_: constr(pattern=r'^[a-zA-Z_][a-zA-Z0-9_]*$', max_length=63) | None = Field(
+        None, alias='from'
+    )
+    """
+    A label the component already emits, carried onto the new name and dropped from the series under its old one.
+    """
+    name: constr(pattern=r'^[a-zA-Z_][a-zA-Z0-9_]*$', max_length=63)
+    """
+    The label to set.
+    """
+    value: constr(max_length=253) | None = None
+    """
+    A fixed value, the same on every series this mapping produces. This is what tells two folded metrics apart.
+    """
+    values: dict[str, constr(max_length=253)] | None = Field(None, max_length=32)
+    """
+    What each of that label's values becomes, for putting an engine's own vocabulary into Modelplane's. A value with no entry here is left as the component wrote it.
+    Only meaningful alongside `from`.
+    """
+
+
 class Metric(BaseModel):
     acrossReplicas: Literal['Sum', 'Mean', 'Max']
     """
-    How a deployment's replicas combine into one series. Every replica reports this metric for itself, and what leaves the cluster is one series for the deployment, so something has to say what the deployment's value is.
-    Sum for anything counted: requests, tokens, joules, a queue's depth. Mean for a ratio, where summing would read two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where the mean hides the replica that is actually in trouble.
-    Required, with no default, because the wrong answer here is silent: a deployment reports a number that looks entirely plausible and is one replica's. A histogram can only be summed, which merges its buckets.
+    How this metric combines over a deployment's replicas.
+    Each replica publishes its own series, told apart by the replica label, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
+    Modelplane does not combine them in the collector. A scrape of one replica is one batch, so a collector that added them up would be adding readings taken at different moments, and two readings of one cumulative counter sum to twice the traffic that happened. The backend holds every replica's series and combines them at query time, where the arithmetic is right.
+    Required, with no default, because the wrong combination is silent: a deployment reports a number that looks entirely plausible.
     """
     from_: constr(pattern=r'^[a-zA-Z_:][a-zA-Z0-9_:]*$', max_length=255) = Field(
         ..., alias='from'
@@ -62,6 +85,16 @@ class Metric(BaseModel):
     """
     What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, and mebibytes multiplied out to bytes.
     Say it whenever the source disagrees with the target, even where the factor looks obvious. A name ending in _bytes that holds mebibytes is the kind of thing nobody notices until a capacity review, and stating the source unit is what makes the conversion happen at all.
+    """
+    labels: list[Label] | None = Field(None, max_length=16)
+    """
+    Labels to set on the series, for folding several metrics into one that a label tells apart - tokens in and out under one name with a direction, responses under one name with the reason they ended.
+    Two mappings writing the same `to` with a different fixed value is how the fold is expressed: each renames its own source and stamps its own value.
+    """
+    part: Literal['Count', 'Sum'] | None = None
+    """
+    Take a part of a histogram as a counter of its own, rather than the histogram itself. Count is how many observations it holds, which is a request count where the histogram measures request duration. Sum is their total.
+    The histogram carries on unchanged under its own name. This adds a series beside it.
     """
     to: constr(pattern=r'^modelplane_[a-z0-9_]*[a-z0-9]$', max_length=255)
     """

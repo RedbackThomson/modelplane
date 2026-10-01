@@ -289,6 +289,11 @@ def _scrape_configs() -> list[dict[str, Any]]:
 # float: 1e-09 is not an OTTL literal. Paths carry their context because the
 # collector rewrites bare ones and asks the author to stop; Modelplane is the
 # author here, so nobody's stored MetricMapping has to change.
+# Taking a part of a histogram is a function that mints a new metric beside it,
+# named for the part. The rename then applies to that.
+_PART_FUNCTION = {"Count": "extract_count_metric(true)", "Sum": "extract_sum_metric(true)"}
+_PART_SUFFIX = {"Count": "_count", "Sum": "_sum"}
+
 _UNIT_CONVERSION = {
     "Millijoules": "datapoint.value_double / 1000",
     "Milliseconds": "datapoint.value_double / 1000",
@@ -309,11 +314,42 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
     metric: list[str] = []
     for mapping in mappings:
         for m in mapping.spec.metrics:
+            source = m.from_
+            if m.part:
+                # Lift the part out first, under the name the extraction gives
+                # it, and rename that. The histogram carries on untouched.
+                suffix = _PART_SUFFIX[m.part]
+                metric.append(f'{_PART_FUNCTION[m.part]} where metric.name == "{source}"')
+                source = f"{source}{suffix}"
             if m.fromUnit:
                 conversion = _UNIT_CONVERSION[m.fromUnit]
-                datapoint.append(f'set(datapoint.value_double, {conversion}) where metric.name == "{m.from_}"')
-            metric.append(f'set(metric.name, "{m.to}") where metric.name == "{m.from_}"')
+                datapoint.append(f'set(datapoint.value_double, {conversion}) where metric.name == "{source}"')
+            # Labels before the rename, while the series still answers to the
+            # name this mapping selected on. After it, two folded mappings share
+            # one name and a statement could no longer tell them apart.
+            datapoint.extend(_label_statements(source, m.labels or []))
+            metric.append(f'set(metric.name, "{m.to}") where metric.name == "{source}"')
     return datapoint, metric
+
+
+def _label_statements(source: str, labels: list[Any]) -> list[str]:
+    """Set this mapping's labels on the datapoints of one source metric."""
+    out: list[str] = []
+    for label in labels:
+        if label.value is not None:
+            out.append(f'set(datapoint.attributes["{label.name}"], "{label.value}") where metric.name == "{source}"')
+            continue
+        carried = f'datapoint.attributes["{label.from_}"]'
+        out.append(f'set(datapoint.attributes["{label.name}"], {carried}) where metric.name == "{source}"')
+        for old, new in sorted((label.values or {}).items()):
+            out.append(
+                f'set(datapoint.attributes["{label.name}"], "{new}") '
+                f'where metric.name == "{source}" and {carried} == "{old}"'
+            )
+        # The component's own name for it goes, or the series carries the same
+        # fact twice under two labels and costs twice the cardinality.
+        out.append(f'delete_key(datapoint.attributes, "{label.from_}") where metric.name == "{source}"')
+    return out
 
 
 def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:

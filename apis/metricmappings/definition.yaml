@@ -104,6 +104,70 @@ spec:
                         Required, with no default, because the wrong
                         combination is silent: a deployment reports a number
                         that looks entirely plausible.
+                    part:
+                      type: string
+                      enum: [Count, Sum]
+                      description: >-
+                        Take a part of a histogram as a counter of its own,
+                        rather than the histogram itself. Count is how many
+                        observations it holds, which is a request count where
+                        the histogram measures request duration. Sum is their
+                        total.
+
+                        The histogram carries on unchanged under its own name.
+                        This adds a series beside it.
+                    labels:
+                      type: array
+                      maxItems: 16
+                      description: >-
+                        Labels to set on the series, for folding several
+                        metrics into one that a label tells apart - tokens in
+                        and out under one name with a direction, responses
+                        under one name with the reason they ended.
+
+                        Two mappings writing the same `to` with a different
+                        fixed value is how the fold is expressed: each renames
+                        its own source and stamps its own value.
+                      items:
+                        type: object
+                        required: [name]
+                        x-kubernetes-validations:
+                        - rule: "has(self.value) != has(self.from)"
+                          message: set either value, for a fixed label, or from, to carry one the component already emits.
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 63
+                            pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$'
+                            description: The label to set.
+                          value:
+                            type: string
+                            maxLength: 253
+                            description: >-
+                              A fixed value, the same on every series this
+                              mapping produces. This is what tells two folded
+                              metrics apart.
+                          from:
+                            type: string
+                            maxLength: 63
+                            pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$'
+                            description: >-
+                              A label the component already emits, carried onto
+                              the new name and dropped from the series under
+                              its old one.
+                          values:
+                            type: object
+                            maxProperties: 32
+                            additionalProperties:
+                              type: string
+                              maxLength: 253
+                            description: >-
+                              What each of that label's values becomes, for
+                              putting an engine's own vocabulary into
+                              Modelplane's. A value with no entry here is left
+                              as the component wrote it.
+
+                              Only meaningful alongside `from`.
                     fromUnit:
                       type: string
                       enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds]
