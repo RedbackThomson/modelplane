@@ -52,7 +52,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
             "kind": "MetricMapping",
             "metadata": {"name": "my-engine"},
             "spec": {
-                "metrics": [{"from": "my_engine_queued", "to": "modelplane_requests_waiting"}],
+                "metrics": [{"from": "my_engine_queued", "to": "modelplane_requests_waiting", "acrossReplicas": "Sum"}],
             },
         }
         cluster = resource.dict_to_struct(
