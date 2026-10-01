@@ -36,6 +36,9 @@ concurrency:
 
 jobs:
   render:
+    # Forks inherit this workflow but not the app id and key it needs, so the
+    # token mint fails there. Only the canonical repo can dispatch to the site.
+    if: github.repository == 'modelplaneai/modelplane'
     runs-on: ubuntu-24.04
     env:
       SITE_REPO: modelplaneai/docs-site
