@@ -13,7 +13,11 @@ from ......k8s.apimachinery.pkg.apis.meta import v1
 class SamlSettings(BaseModel):
     forceAuthn: bool | None = None
     """
-    if "true", the identity provider MUST authenticate the presenter directly rather than rely on a previous security context.
+    :
+
+    If true, the SAML AuthnRequest asks the identity provider to authenticate the user instead of reusing an existing IdP session. (See
+    SAML Core 2.0, section 3.4.1, ForceAuthn: https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf) Limitations: the SAML
+    response does not let verify whether the identity provider honored this request; support depends on the identity provider.
     """
     idpIssuer: str | None = None
     """
@@ -186,6 +190,10 @@ class AtProvider(BaseModel):
     """
     Labels associated with the resource.
     """
+    labelsAll: dict[str, str] | None = None
+    """
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
+    """
     metadata: dict[str, Any] | None = None
     name: str | None = None
     """
@@ -260,6 +268,13 @@ class StatusModel(BaseModel):
     conditions: list[Condition] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """

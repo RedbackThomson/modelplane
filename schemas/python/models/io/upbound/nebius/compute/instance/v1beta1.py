@@ -97,6 +97,33 @@ class SourceImageFamily(BaseModel):
     """
 
 
+class SourceSnapshotIdRef(BaseModel):
+    name: str
+    """
+    Name of the referenced object.
+    """
+    policy: Policy | None = None
+    """
+    Policies for referencing.
+    """
+
+
+class SourceSnapshotIdSelector(BaseModel):
+    matchControllerRef: bool | None = None
+    """
+    MatchControllerRef ensures an object with the same controller reference
+    as the selecting object is selected.
+    """
+    matchLabels: dict[str, str] | None = None
+    """
+    MatchLabels ensures an object with matching labels is selected.
+    """
+    policy: Policy | None = None
+    """
+    Policies for selection.
+    """
+
+
 class Spec(BaseModel):
     blockSizeBytes: float | None = None
     """
@@ -138,12 +165,25 @@ class Spec(BaseModel):
     """
     sourceImageFamily: SourceImageFamily | None = None
     """
-    (Attributes) Cannot be set alongside source_image_id. (see below for nested schema)
+    (Attributes) Cannot be set alongside source_image_id or source_snapshot_id. (see below for nested schema)
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
-    *Cannot be set alongside source_image_family.*
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
+    *Cannot be set alongside source_image_family or source_snapshot_id.*
+    """
+    sourceSnapshotId: str | None = None
+    """
+    (String) Cannot be set alongside source_image_id or source_image_family.
+    *Cannot be set alongside source_image_id or source_image_family.*
+    """
+    sourceSnapshotIdRef: SourceSnapshotIdRef | None = None
+    """
+    Reference to a DiskSnapshot in compute to populate sourceSnapshotId.
+    """
+    sourceSnapshotIdSelector: SourceSnapshotIdSelector | None = None
+    """
+    Selector for a DiskSnapshot in compute to populate sourceSnapshotId.
     """
     type: str | None = None
     """
@@ -203,8 +243,11 @@ class BootDisk(BaseModel):
     """
     deviceId: str | None = None
     """
-    defined identifier, allowing to use '/dev/disk/by-id/virtio-{device_id}' as a device path in mount command.
-    Specifies the user-defined identifier, allowing to use '/dev/disk/by-id/virtio-{device_id}' as a device path in mount command.
+    (String) :
+    :
+
+    Specifies the user-defined device identifier.
+    Use `/dev/disk/by-id/virtio-{device_id}` as the device path in a mount command.
     """
     existingDisk: ExistingDisk | None = None
     """
@@ -511,8 +554,11 @@ class SecondaryDisk(BaseModel):
     """
     deviceId: str | None = None
     """
-    defined identifier, allowing to use '/dev/disk/by-id/virtio-{device_id}' as a device path in mount command.
-    Specifies the user-defined identifier, allowing to use '/dev/disk/by-id/virtio-{device_id}' as a device path in mount command.
+    (String) :
+    :
+
+    Specifies the user-defined device identifier.
+    Use `/dev/disk/by-id/virtio-{device_id}` as the device path in a mount command.
     """
     existingDisk: ExistingDisk | None = None
     """
@@ -551,6 +597,22 @@ class ServiceAccountIdSelector(BaseModel):
     """
 
 
+class SpotPricingPolicy(BaseModel):
+    id: str | None = None
+    """
+    (String) Identifier for the resource, unique for its resource type.
+    PricingPolicy ID used as the maximum agreed price for the preemptible VM.
+    """
+    idRef: IdRef | None = None
+    """
+    Reference to a PricingPolicy in billing to populate id.
+    """
+    idSelector: IdSelector | None = None
+    """
+    Selector for a PricingPolicy in billing to populate id.
+    """
+
+
 class ForProvider(BaseModel):
     bootDisk: BootDisk | None = None
     """
@@ -567,6 +629,10 @@ class ForProvider(BaseModel):
     filesystems: list[Filesystem] | None = None
     """
     (Attributes List) List of Shared Filesystems attached to the instance. (see below for nested schema)
+    """
+    followsSpotPrice: dict[str, Any] | None = None
+    """
+    (Attributes) :
     """
     gpuCluster: GpuCluster | None = None
     """
@@ -607,6 +673,10 @@ class ForProvider(BaseModel):
     (String) NVLink Instance Group ID associated with the VM
     NVLink Instance Group ID associated with the VM
     """
+    onDemand: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     parentId: str | None = None
     """
     (String) Identifier of the parent resource to which the resource belongs.
@@ -627,6 +697,8 @@ class ForProvider(BaseModel):
     be restarted and billed accordingly. Stop instance via API or UI to stop it to avoid recovering.
     - If set to RECOVER, instance will be restarted, if possible. It could be restarted on the same host or on another host.
     - If set to FAIL, instance will be stopped and not restarted.
+    - If set to ALWAYS, keep retrying recovery indefinitely until the instance is recovered. Available only for instances in
+    nvlinstancegroup
 
     #### Supported values
 
@@ -634,6 +706,7 @@ class ForProvider(BaseModel):
 
     - `RECOVER`
     - `FAIL`
+    - `ALWAYS`
     """
     reservationPolicy: ReservationPolicy | None = None
     """
@@ -662,6 +735,10 @@ class ForProvider(BaseModel):
     serviceAccountIdSelector: ServiceAccountIdSelector | None = None
     """
     Selector for a ServiceAccount in iam to populate serviceAccountId.
+    """
+    spotPricingPolicy: SpotPricingPolicy | None = None
+    """
+    (Attributes) :
     """
     stopped: bool | None = None
     """
@@ -687,6 +764,10 @@ class InitProvider(BaseModel):
     """
     (Attributes List) List of Shared Filesystems attached to the instance. (see below for nested schema)
     """
+    followsSpotPrice: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     gpuCluster: GpuCluster | None = None
     """
     (Attributes) :
@@ -726,6 +807,10 @@ class InitProvider(BaseModel):
     (String) NVLink Instance Group ID associated with the VM
     NVLink Instance Group ID associated with the VM
     """
+    onDemand: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     parentId: str | None = None
     """
     (String) Identifier of the parent resource to which the resource belongs.
@@ -746,6 +831,8 @@ class InitProvider(BaseModel):
     be restarted and billed accordingly. Stop instance via API or UI to stop it to avoid recovering.
     - If set to RECOVER, instance will be restarted, if possible. It could be restarted on the same host or on another host.
     - If set to FAIL, instance will be stopped and not restarted.
+    - If set to ALWAYS, keep retrying recovery indefinitely until the instance is recovered. Available only for instances in
+    nvlinstancegroup
 
     #### Supported values
 
@@ -753,6 +840,7 @@ class InitProvider(BaseModel):
 
     - `RECOVER`
     - `FAIL`
+    - `ALWAYS`
     """
     reservationPolicy: ReservationPolicy | None = None
     """
@@ -781,6 +869,10 @@ class InitProvider(BaseModel):
     serviceAccountIdSelector: ServiceAccountIdSelector | None = None
     """
     Selector for a ServiceAccount in iam to populate serviceAccountId.
+    """
+    spotPricingPolicy: SpotPricingPolicy | None = None
+    """
+    (Attributes) :
     """
     stopped: bool | None = None
     """
@@ -917,12 +1009,17 @@ class SpecModel1(BaseModel):
     """
     sourceImageFamily: SourceImageFamily | None = None
     """
-    (Attributes) Cannot be set alongside source_image_id. (see below for nested schema)
+    (Attributes) Cannot be set alongside source_image_id or source_snapshot_id. (see below for nested schema)
     """
     sourceImageId: str | None = None
     """
-    (String) Cannot be set alongside source_image_family.
-    *Cannot be set alongside source_image_family.*
+    (String) Cannot be set alongside source_image_family or source_snapshot_id.
+    *Cannot be set alongside source_image_family or source_snapshot_id.*
+    """
+    sourceSnapshotId: str | None = None
+    """
+    (String) Cannot be set alongside source_image_id or source_image_family.
+    *Cannot be set alongside source_image_id or source_image_family.*
     """
     type: str | None = None
     """
@@ -1003,6 +1100,14 @@ class NetworkInterfaceModel(BaseModel):
     """
     (String) Subnet ID
     Subnet ID
+    """
+
+
+class SpotPricingPolicyModel(BaseModel):
+    id: str | None = None
+    """
+    (String) Identifier for the resource, unique for its resource type.
+    PricingPolicy ID used as the maximum agreed price for the preemptible VM.
     """
 
 
@@ -1125,6 +1230,10 @@ class NetworkInterfaceModel1(BaseModel):
     """
     (Attributes) :
     """
+    securityGroups: list[SecurityGroupModel] | None = None
+    """
+    (Attributes List) :
+    """
 
 
 class Status(BaseModel):
@@ -1138,7 +1247,8 @@ class Status(BaseModel):
     """
     maintenanceEventId: str | None = None
     """
-    (String)
+    (String) Identifier of the maintenance event associated with the instance, if any.
+    Identifier of the maintenance event associated with the instance, if any.
     """
     networkInterfaces: list[NetworkInterfaceModel1] | None = None
     """
@@ -1192,6 +1302,10 @@ class AtProvider(BaseModel):
     """
     (Attributes List) List of Shared Filesystems attached to the instance. (see below for nested schema)
     """
+    followsSpotPrice: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     gpuCluster: GpuClusterModel | None = None
     """
     (Attributes) :
@@ -1212,6 +1326,11 @@ class AtProvider(BaseModel):
     """
     (Map of String) Labels associated with the resource.
     Labels associated with the resource.
+    """
+    labelsAll: dict[str, str] | None = None
+    """
+    (Map of String) Effective labels sent to the API after merging provider default_labels with resource labels.
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
     """
     localDisks: LocalDisks | None = None
     """
@@ -1235,6 +1354,10 @@ class AtProvider(BaseModel):
     (String) NVLink Instance Group ID associated with the VM
     NVLink Instance Group ID associated with the VM
     """
+    onDemand: dict[str, Any] | None = None
+    """
+    (Attributes) :
+    """
     parentId: str | None = None
     """
     (String) Identifier of the parent resource to which the resource belongs.
@@ -1255,6 +1378,8 @@ class AtProvider(BaseModel):
     be restarted and billed accordingly. Stop instance via API or UI to stop it to avoid recovering.
     - If set to RECOVER, instance will be restarted, if possible. It could be restarted on the same host or on another host.
     - If set to FAIL, instance will be stopped and not restarted.
+    - If set to ALWAYS, keep retrying recovery indefinitely until the instance is recovered. Available only for instances in
+    nvlinstancegroup
 
     #### Supported values
 
@@ -1262,6 +1387,7 @@ class AtProvider(BaseModel):
 
     - `RECOVER`
     - `FAIL`
+    - `ALWAYS`
     """
     reservationPolicy: ReservationPolicy | None = None
     """
@@ -1292,6 +1418,10 @@ class AtProvider(BaseModel):
 
     Unique identifier of the service account associated with this instance.
     For details, see https://docs.nebius.com/iam/service-accounts/manage
+    """
+    spotPricingPolicy: SpotPricingPolicyModel | None = None
+    """
+    (Attributes) :
     """
     status: Status | None = None
     """
@@ -1350,6 +1480,13 @@ class StatusModel(BaseModel):
     conditions: list[Condition] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """

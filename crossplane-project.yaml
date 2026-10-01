@@ -154,7 +154,7 @@ spec:
       apiVersion: pkg.crossplane.io/v1
       kind: Provider
       package: xpkg.upbound.io/upbound/provider-nebius
-      version: v1.0.1
+      version: v1.2.0
   - type: xpkg
     xpkg:
       apiVersion: pkg.crossplane.io/v1

@@ -87,6 +87,117 @@ class Cors(BaseModel):
     """
 
 
+class Policy(BaseModel):
+    resolution: Literal['Required', 'Optional'] | None = 'Required'
+    """
+    Resolution specifies whether resolution of this reference is required.
+    The default is 'Required', which means the reconcile will fail if the
+    reference cannot be resolved. 'Optional' means this reference will be
+    a no-op if it cannot be resolved.
+    """
+    resolve: Literal['Always', 'IfNotPresent'] | None = None
+    """
+    Resolve specifies when this reference should be resolved. The default
+    is 'IfNotPresent', which will attempt to resolve the reference only when
+    the corresponding field is not present. Use 'Always' to resolve the
+    reference on every reconcile.
+    """
+
+
+class FilesystemIdRef(BaseModel):
+    name: str
+    """
+    Name of the referenced object.
+    """
+    namespace: str | None = None
+    """
+    Namespace of the referenced object
+    """
+    policy: Policy | None = None
+    """
+    Policies for referencing.
+    """
+
+
+class FilesystemIdSelector(BaseModel):
+    matchControllerRef: bool | None = None
+    """
+    MatchControllerRef ensures an object with the same controller reference
+    as the selecting object is selected.
+    """
+    matchLabels: dict[str, str] | None = None
+    """
+    MatchLabels ensures an object with matching labels is selected.
+    """
+    namespace: str | None = None
+    """
+    Namespace for the selector
+    """
+    policy: Policy | None = None
+    """
+    Policies for selection.
+    """
+
+
+class FilesystemBucket(BaseModel):
+    directory: str | None = None
+    """
+    (String) :
+    :
+
+    Directory within the filesystem that will be used as a root for the bucket.
+    If not empty, it must be an absolute normalized path (no ., .., or doubled /).
+    Empty value means that the bucket will be mounted at the filesystem root (/).
+    """
+    directoryMode: str | None = None
+    """
+    (String) :
+    :
+
+    Linux permissions that will be applied for uploaded directories.
+    Permissions are specified in octal format (one to four octal numbers), e.g. "644" or "755".
+    The default value is 755 (rwxr-xr-x).
+    """
+    fileMode: str | None = None
+    """
+    (String) :
+    :
+
+    Linux permissions that will be applied for uploaded files.
+    Permissions are specified in octal format (one to four octal numbers), e.g. "644" or "755".
+    The default value is 644 (rw-r--r--).
+    """
+    filesystemId: str | None = None
+    """
+    (String) Identifier of filesystem to be exposed via Object Storage API.
+    Identifier of filesystem to be exposed via Object Storage API.
+    """
+    filesystemIdRef: FilesystemIdRef | None = None
+    """
+    Reference to a Filesystem in compute to populate filesystemId.
+    """
+    filesystemIdSelector: FilesystemIdSelector | None = None
+    """
+    Selector for a Filesystem in compute to populate filesystemId.
+    """
+    gid: float | None = None
+    """
+    (Number) :
+    :
+
+    GID that will be used for write operations to the filesystem.
+    By default, root user (UID=0, GID=0) is used.
+    """
+    uid: float | None = None
+    """
+    (Number) :
+    :
+
+    UID that will be used for write operations to the filesystem.
+    By default, root user (UID=0, GID=0) is used.
+    """
+
+
 class Condition(BaseModel):
     methods: list[str] | None = None
     """
@@ -407,6 +518,10 @@ class ForProvider(BaseModel):
     - `INTELLIGENT`
     - `FILESYSTEM` - Special storage class only for filesystem buckets.
     """
+    filesystemBucket: FilesystemBucket | None = None
+    """
+    (Attributes) Bucket that uses the existing client's compute filesystem. (see below for nested schema)
+    """
     forceStorageClass: bool | None = None
     """
     amz-storage-class header.
@@ -620,6 +735,10 @@ class InitProvider(BaseModel):
     - `INTELLIGENT`
     - `FILESYSTEM` - Special storage class only for filesystem buckets.
     """
+    filesystemBucket: FilesystemBucket | None = None
+    """
+    (Attributes) Bucket that uses the existing client's compute filesystem. (see below for nested schema)
+    """
     forceStorageClass: bool | None = None
     """
     amz-storage-class header.
@@ -820,6 +939,57 @@ class RuleModel6(BaseModel):
     """
 
 
+class FilesystemBucketModel(BaseModel):
+    directory: str | None = None
+    """
+    (String) :
+    :
+
+    Directory within the filesystem that will be used as a root for the bucket.
+    If not empty, it must be an absolute normalized path (no ., .., or doubled /).
+    Empty value means that the bucket will be mounted at the filesystem root (/).
+    """
+    directoryMode: str | None = None
+    """
+    (String) :
+    :
+
+    Linux permissions that will be applied for uploaded directories.
+    Permissions are specified in octal format (one to four octal numbers), e.g. "644" or "755".
+    The default value is 755 (rwxr-xr-x).
+    """
+    fileMode: str | None = None
+    """
+    (String) :
+    :
+
+    Linux permissions that will be applied for uploaded files.
+    Permissions are specified in octal format (one to four octal numbers), e.g. "644" or "755".
+    The default value is 644 (rw-r--r--).
+    """
+    filesystemId: str | None = None
+    """
+    (String) Identifier of filesystem to be exposed via Object Storage API.
+    Identifier of filesystem to be exposed via Object Storage API.
+    """
+    gid: float | None = None
+    """
+    (Number) :
+    :
+
+    GID that will be used for write operations to the filesystem.
+    By default, root user (UID=0, GID=0) is used.
+    """
+    uid: float | None = None
+    """
+    (Number) :
+    :
+
+    UID that will be used for write operations to the filesystem.
+    By default, root user (UID=0, GID=0) is used.
+    """
+
+
 class RuleModel7(BaseModel):
     abortIncompleteMultipartUpload: AbortIncompleteMultipartUpload | None = None
     """
@@ -944,6 +1114,26 @@ class Counter(BaseModel):
     """
 
 
+class InsecureEndpoint(BaseModel):
+    mode: str | None = None
+    """
+    (String) :
+    :
+
+    Determines where the plain HTTP endpoint is available.
+
+    #### Supported values
+
+    Defines where the plain HTTP endpoint is available.
+    Possible values:
+
+    - `MODE_UNSPECIFIED`
+    - `DISABLED` - Plain HTTP access is disabled.
+    - `REGION_LOCAL` - Plain HTTP access is available only from the same region.
+    - `ALL` - Plain HTTP access is available from any network.
+    """
+
+
 class Status(BaseModel):
     anonymousAccessEnabled: bool | None = None
     """
@@ -952,6 +1142,20 @@ class Status(BaseModel):
 
     Indicator flag showing whether the bucket has any BucketPolicy rule
     that grants anonymous access to any object, prefix, or the entire bucket.
+    """
+    bucketType: str | None = None
+    """
+    (String) :
+    :
+
+    #### Supported values
+
+    BucketType is a type of the bucket.
+    Possible values:
+
+    - `BUCKET_TYPE_UNSPECIFIED`
+    - `REGULAR` - Regular object storage bucket.
+    - `FILESYSTEM` - Object storage bucket that is mounted to an existing compute filesystem.
     """
     counters: list[Counter] | None = None
     """
@@ -974,6 +1178,10 @@ class Status(BaseModel):
 
     The domain of the endpoint where the bucket can be accessed. It omits the scheme (HTTPS) and the port (443)
     and contains only the FQDN address.
+    """
+    insecureEndpoint: InsecureEndpoint | None = None
+    """
+    (Attributes) :
     """
     purgeAt: str | None = None
     """
@@ -1060,6 +1268,10 @@ class AtProvider(BaseModel):
     - `INTELLIGENT`
     - `FILESYSTEM` - Special storage class only for filesystem buckets.
     """
+    filesystemBucket: FilesystemBucketModel | None = None
+    """
+    (Attributes) Bucket that uses the existing client's compute filesystem. (see below for nested schema)
+    """
     forceStorageClass: bool | None = None
     """
     amz-storage-class header.
@@ -1073,6 +1285,11 @@ class AtProvider(BaseModel):
     """
     (Map of String) Labels associated with the resource.
     Labels associated with the resource.
+    """
+    labelsAll: dict[str, str] | None = None
+    """
+    (Map of String) Effective labels sent to the API after merging provider default_labels with resource labels.
+    Effective labels sent to the API after merging provider `default_labels` with resource `labels`.
     """
     lifecycleConfiguration: LifecycleConfiguration | None = None
     """
@@ -1199,6 +1416,13 @@ class StatusModel(BaseModel):
     conditions: list[ConditionModel] | None = None
     """
     Conditions of the resource.
+    """
+    lastHandledReconcileAt: str | None = None
+    """
+    LastHandledReconcileAt holds the value of the most recent
+    reconcile-requested-at annotation token that the controller has
+    processed. Users can compare this to the annotation to determine
+    whether a reconcile request has been handled.
     """
     observedGeneration: int | None = None
     """
