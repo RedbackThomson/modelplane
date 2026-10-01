@@ -96,6 +96,17 @@ class TestConfig(unittest.TestCase):
                     continue  # a port filter, not a pod filter
                 self.assertIn(kept, predicate(substrate, "drop"), f"{job} keeps {kept}, substrate does not drop it")
 
+    def test_only_the_identity_survives_to_the_exporter(self) -> None:
+        """Discovery attaches the pod's name and uid; neither is the deployment's."""
+        blocks = _config()["processors"]["transform/identity"]["metric_statements"]
+        statement = blocks[0]["statements"][0]
+        # OTTL quotes with double quotes. A Python list renders single ones and
+        # the collector refuses to start, which a unit test on shape won't catch.
+        self.assertNotIn("'", statement)
+        self.assertIn('keep_keys(resource.attributes, ["cluster"', statement)
+        pipeline = _config()["service"]["pipelines"]["metrics"]["processors"]
+        self.assertLess(pipeline.index("transform/identity"), pipeline.index("groupbyattrs/replicas"))
+
     def test_engine_scrape_selects_the_port_by_name(self) -> None:
         """Matching by number would find the pd-sidecar on a disaggregated pod."""
         jobs = {j["job_name"]: j for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]}

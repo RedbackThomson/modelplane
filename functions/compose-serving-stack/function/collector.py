@@ -51,6 +51,19 @@ _DEPLOYMENT_LABEL = "modelplane_ai_deployment"
 # disaggregated pod, which would answer and serve the wrong thing.
 _METRICS_PORT = "http"
 
+# What a series is attributed to, and the only resource attributes that survive
+# to the exporter. The merge across replicas groups on exactly these, so a
+# series differing in nothing else is one series.
+#
+# node is here for the GPU job, whose series belong to hardware rather than to
+# a deployment; an engine's series carry no node, which is what lets replicas on
+# different nodes merge.
+_IDENTITY = ("cluster", "namespace", "deployment", "engine", "role", "node")
+
+# OTTL quotes strings with double quotes; a Python list renders single ones and
+# the collector refuses to start on it.
+_IDENTITY_OTTL = ", ".join(f'"{k}"' for k in sorted(_IDENTITY))
+
 _SCRAPE_INTERVAL = "15s"
 _SUBSTRATE_INTERVAL = "30s"
 
@@ -367,16 +380,36 @@ def config(
         # cluster is stamped here rather than downstream: one receiver on the
         # control plane sees a merged stream and cannot tell senders apart.
         "resource/cluster": {"attributes": [{"key": "cluster", "value": cluster, "action": "upsert"}]},
+        # Everything a replica carries that is the replica's rather than the
+        # deployment's. Discovery attaches the pod's name, uid and replicaset,
+        # and the scrape its address, and all of it lands on the resource -
+        # where it does two kinds of damage.
+        #
+        # The merge below groups on the resource, so a pod name on it keeps
+        # every replica in a resource of its own and nothing merges. And an
+        # exporter that flattens resources into labels then publishes a pod
+        # label, which a rolling update mints afresh on every deploy and a
+        # billing backend counts as active for half an hour after it dies.
+        #
+        # An allowlist rather than a list of what to drop: what discovery
+        # attaches grows, and a series carrying something nobody chose is the
+        # failure this prevents.
+        "transform/identity": {
+            "metric_statements": [
+                {"context": "resource", "statements": [f"keep_keys(resource.attributes, [{_IDENTITY_OTTL}])"]}
+            ]
+        },
         "transform/modelplane": _transform(mappings),
         # A pod's identity is a resource attribute, where a metric processor
         # cannot reach it. Strip and merge the resources first, or the
         # aggregation below combines nothing.
-        "groupbyattrs/replicas": {"keys": ["cluster", "namespace", "deployment", "engine", "role"]},
+        "groupbyattrs/replicas": {"keys": list(_IDENTITY)},
         "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
         "batch": {"timeout": "10s"},
     }
     pipeline = [
         "resource/cluster",
+        "transform/identity",
         "transform/modelplane",
         "groupbyattrs/replicas",
         "filter/modelplane",
