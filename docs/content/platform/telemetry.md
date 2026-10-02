@@ -26,8 +26,9 @@ Every series carries `cluster`, `job`, and `instance` labels of the target
 resource. A series about a deployment also carries `deployment`, `replica`,
 `namespace`, `engine`, and `role` labels.
 
-Each replica publishes its own series, so combine them in your query. Use the
-aggregation that the metric's `acrossReplicas` field in its `MetricMapping` names:
+Each replica publishes its own series, so combine them in your query. Every metric
+records which combination is the right one for it, as `acrossReplicas` in its
+`MetricMapping`, so you don't have to work it out per metric:
 
  - `sum by (deployment)`, for anything counted, such as requests, tokens, or queue depth.
  - `avg by (deployment)`, for a ratio.
@@ -46,12 +47,8 @@ and survives a restart and a rolling update. Group by `replica`, not by `instanc
 # One line per replica, stable across rolling updates
 max by (deployment, replica) (modelplane_kv_cache_utilization_ratio)
 ```
-The `instance` label is the pod's address. Without the `instance` label two pods writing to the same
-series would collide and a deployment with several pods per
-replica or two gateway pods couldn't distinguish between the pods.
-
-The `instance` label changes on a rolling update so queries that group by this
-label gain a new series every time you deploy. Group by `replica` instead.
+`instance` is the pod's address, which keeps two pods of the same replica apart. It
+turns over on every rolling update, so group by `replica` rather than by `instance`.
 
 Some examples of the available metrics:
 
@@ -127,8 +124,8 @@ spec:
       bearerTokenKey: token
 ```
 
-Modelplane configures the collector to send the token with every export. It reads the
-token from a file rather than the environment, so rotating it needs no restart.
+Modelplane configures the collector to send the token with every export. Rotating the
+token needs no restart.
 
 If you run Prometheus, export to your Prometheus endpoint instead and query the fleet there:
 
@@ -234,8 +231,8 @@ export to Prometheus and write recording rules there.
 
 ## Engines
 
-Modelplane renames vLLM's and SGLang's own metrics for you, so neither needs a mapping.
-SGLang needs two flags: `--enable-metrics` to publish `/metrics` at all, and
+Modelplane already knows vLLM's and SGLang's metric names and renames them for you, so
+neither needs anything from you here. SGLang needs two flags: `--enable-metrics` to publish `/metrics` at all, and
 `--collect-tokens-histogram` for the prompt and generation histograms behind
 `modelplane_request_input_tokens` and `modelplane_request_output_tokens`. Without the
 second it publishes those as plain counters and both series stay empty. vLLM needs
@@ -275,9 +272,9 @@ SGLang publishes no queue time per request and no preemption counters, so
 `modelplane_request_queue_seconds` and `modelplane_requests_preempted_total` carry vLLM
 only.
 
-Any other OpenAI-compatible engine reports its top-line numbers with no configuration. The
-gateway measures those, not the engine, so `modelplane_frontend_*` works for an engine
-Modelplane has never seen.
+Any other OpenAI-compatible engine reports its frontend numbers with no configuration.
+The gateway measures those, not the engine, so `modelplane_frontend_*` works for an
+engine Modelplane has never seen.
 
 To normalize that engine's own metrics as well, create a `MetricMapping`:
 

@@ -83,7 +83,7 @@ class Sink(BaseModel):
     type: constr(max_length=63)
     """
     The collector exporter to send with, by the name OpenTelemetry gives it: otlphttp, otlp, prometheus_remote_write, kafka, and every other one the collector provides.
-    Not an enum, because enumerating them here would mean a Modelplane release for each exporter the collector gains, and the collector already refuses to start on a name it doesn't have.
+    Not an enum: the collector already refuses to start on a name it doesn't have, so repeating the list here would only add a second place for it to go stale.
     """
 
 
