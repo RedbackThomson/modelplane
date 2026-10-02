@@ -291,6 +291,23 @@ def telemetry_labels(
     return labels
 
 
+def fleet_labels(replica: v1alpha1.ModelReplica, role: str) -> dict[str, str]:
+    """What a metric off a non-serving pod of this replica is attributed to.
+
+    The picker is one of these: it belongs to a replica of a deployment and
+    carries no engine, because it serves no model. Same labels as a serving
+    pod otherwise, so the collector reads it off the pod with the rules it
+    already has and a series off the picker joins the deployment's.
+    """
+    labels: dict[str, str] = {LABEL_ROLE: role}
+    own = (replica.metadata.labels if replica.metadata else None) or {}
+    if name := own.get(LABEL_DEPLOYMENT):
+        labels[LABEL_DEPLOYMENT] = name
+    if index := own.get(_LABEL_REPLICA_INDEX):
+        labels[LABEL_REPLICA] = index
+    return labels
+
+
 def pod_metadata(
     member: v1alpha1.Member,
     labels: dict[str, str] | None = None,

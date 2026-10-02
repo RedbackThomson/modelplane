@@ -955,6 +955,44 @@ class TestDisaggregated(unittest.TestCase):
         self.assertEqual(pool["kind"], "InferencePool")
         self.assertEqual(pool["spec"]["endpointPickerRef"]["name"], "r-epp")
 
+    def test_the_picker_is_scrapeable_and_attributed(self) -> None:
+        """A built-in MetricMapping renames the picker's scheduling latency.
+
+        Nothing can match it unless something scrapes the picker, and the
+        collector's engine job keeps a pod on two things: the deployment
+        label, and a container port named `http`. Without both, the mapping
+        is config that matches nothing for the life of the fleet.
+
+        Its metrics endpoint authenticates callers by TokenReview by default,
+        which needs a ClusterRole the picker's namespaced ServiceAccount
+        cannot hold, so every scrape would be rejected. --secure-serving is
+        left alone: that one is the ext-proc gRPC server Envoy calls.
+        """
+        replica = _replica()
+        replica.metadata = metav1.ObjectMeta(
+            name="r",
+            namespace="ml-team",
+            labels={base.LABEL_DEPLOYMENT: "qwen3-8b", "modelplane.ai/replica-index": "2"},
+        )
+        replica.spec.serving = v1alpha1.Serving(mode="Unified")
+        composed = {}
+        for engine in replica.spec.engines:
+            composed.update(native.NativeBackend().build(replica, engine, _PC, base.serving_label(replica), "Standard"))
+        template = routing.apply(composed, replica, _PC)["epp"].spec.forProvider.manifest["spec"]["template"]
+
+        labels = template["metadata"]["labels"]
+        self.assertEqual(labels[base.LABEL_DEPLOYMENT], "qwen3-8b")
+        self.assertEqual(labels[base.LABEL_REPLICA], "2")
+        self.assertEqual(labels[base.LABEL_ROLE], "picker")
+        # Still the Deployment's own selector label, which must not move.
+        self.assertEqual(labels["app"], "r-epp")
+
+        container = next(c for c in template["spec"]["containers"] if c["name"] == "epp")
+        self.assertIn({"name": base.ENGINE_PORT_NAME, "containerPort": 9090}, container["ports"])
+        self.assertIn("--metrics-port=9090", container["args"])
+        self.assertIn("--metrics-endpoint-auth=false", container["args"])
+        self.assertNotIn("--secure-serving=false", container["args"])
+
     def test_injects_nixl_plumbing(self) -> None:
         """Both disagg engines get the NIXL plumbing the schema can't express:
         a Memory /dev/shm and VLLM_NIXL_SIDE_CHANNEL_HOST = pod IP."""
@@ -1058,6 +1096,19 @@ class TestDisaggregated(unittest.TestCase):
         self.assertEqual(sidecar["ports"][0]["containerPort"], 8000)
         self.assertEqual(sidecar["readinessProbe"]["timeoutSeconds"], 5)
         self.assertIn("--secure-proxy=false", sidecar["args"])
+
+    def test_a_decode_engine_keeps_a_scrapeable_port(self) -> None:
+        """The collector's engine job keeps a pod on the port named `http`.
+
+        Moving the decode engine off 8000 for the sidecar drops the name with
+        it, and the sidecar takes the port unnamed because it serves inference
+        rather than /metrics. A decode pod with no named port anywhere is one
+        nothing scrapes, so a disaggregated deployment reports half its
+        engines and the shortfall looks like idle capacity.
+        """
+        containers = self._serving_pod(self._apply(), "decode")["spec"]["containers"]
+        engine = next(c for c in containers if c["name"] == "engine")
+        self.assertEqual(engine["ports"], [{"name": base.ENGINE_PORT_NAME, "containerPort": 8001}])
 
     def test_prefill_has_no_sidecar(self) -> None:
         containers = self._serving_pod(self._apply(), "prefill")["spec"]["containers"]
