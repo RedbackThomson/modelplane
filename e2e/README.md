@@ -66,8 +66,6 @@ and `DCGM_FI_DEV_FB_USED` — so `--verify` asserts they arrive as
 MiB became 1073741824 bytes, that each carries its deployment, engine, role and
 cluster, and that the engine's own `vllm:` names did *not* leave the cluster.
 
-It costs no extra wait: the destination is applied with every other manifest, so
-the collector composes while the model is still rolling out.
 
 ### Why cloud provisioning cannot be tested here
 

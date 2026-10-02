@@ -47,7 +47,8 @@ class Label(BaseModel):
         None, alias='from'
     )
     """
-    A label the component already emits, carried onto the new name and dropped from the series under its old one.
+    A label the component already emits. Modelplane copies its value into this label and removes the original.
+    Naming the label itself keeps it: that is how `values` rewrites what a component writes without renaming the label.
     """
     name: constr(pattern=r'^[a-zA-Z_][a-zA-Z0-9_]*$', max_length=63)
     """
@@ -60,7 +61,6 @@ class Label(BaseModel):
     values: dict[str, constr(max_length=253)] | None = Field(None, max_length=32)
     """
     What each of that label's values becomes, for putting an engine's own vocabulary into Modelplane's. A value with no entry here is left as the component wrote it.
-    Only meaningful alongside `from`.
     """
 
 
@@ -68,7 +68,7 @@ class Metric(BaseModel):
     acrossReplicas: Literal['Sum', 'Mean', 'Max']
     """
     How this metric combines over a deployment's replicas.
-    Each replica publishes its own series, told apart by the replica label, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
+    Every pod publishes its own series, told apart by the replica it belongs to and the instance it was scraped from, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
     Modelplane does not combine them in the collector. A scrape of one replica is one batch, so a collector that added them up would be adding readings taken at different moments, and two readings of one cumulative counter sum to twice the traffic that happened. The backend holds every replica's series and combines them at query time, where the arithmetic is right.
     Required, with no default, because the wrong combination is silent: a deployment reports a number that looks entirely plausible.
     """
@@ -76,29 +76,30 @@ class Metric(BaseModel):
         ..., alias='from'
     )
     """
-    The metric's name as the component emits it, matched exactly. Nothing here declares which engine a deployment runs: a name that no component emits simply matches nothing.
-    Held to the characters a metric name can contain. The name is matched inside the collector's own query language, so a quote here would end the comparison early and rename whatever the rest of the line matched.
+    The metric's name as the component exposes it, matched exactly wherever it appears in the fleet.
+    A histogram is named by its base name, without the _count, _sum or _bucket a Prometheus query would use: the collector holds it as one metric, and `part` is what reaches into it.
     """
     fromUnit: (
-        Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds'] | None
+        Literal['Millijoules', 'Mebibytes', 'Milliseconds', 'Nanoseconds', 'Percent']
+        | None
     ) = None
     """
-    What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, and mebibytes multiplied out to bytes.
-    Say it whenever the source disagrees with the target, even where the factor looks obvious. A name ending in _bytes that holds mebibytes is the kind of thing nobody notices until a capacity review, and stating the source unit is what makes the conversion happen at all.
+    What the component measures this in, when that isn't the unit the name claims. Modelplane converts to the base unit: millijoules and milliseconds are divided by a thousand, nanoseconds by a billion, percent by a hundred, and mebibytes multiplied out to bytes. A histogram is converted whole - its sum, its bounds and its bucket boundaries - so its quantiles come out in the target unit too.
+    Percent is for a component that counts a saturation from nought to a hundred where the name says a ratio. Check rather than assume: vLLM publishes kv_cache_usage_perc and the value is a fraction, so a name is no guide.
     """
     labels: list[Label] | None = Field(None, max_length=16)
     """
-    Labels to set on the series, for folding several metrics into one that a label tells apart - tokens in and out under one name with a direction, responses under one name with the reason they ended.
-    Two mappings writing the same `to` with a different fixed value is how the fold is expressed: each renames its own source and stamps its own value.
+    Labels to set on this metric's series. To fold several metrics into one name, give each its own entry with the same `to` and a different fixed value, such as direction: input and direction: output on modelplane_tokens_total.
     """
     part: Literal['Count', 'Sum'] | None = None
     """
     Take a part of a histogram as a counter of its own, rather than the histogram itself. Count is how many observations it holds, which is a request count where the histogram measures request duration. Sum is their total.
-    The histogram carries on unchanged under its own name. This adds a series beside it.
+    The extraction leaves the histogram alone, but the collector exports only what a mapping renames, so the histogram itself is dropped unless another mapping gives it a `modelplane_` name of its own. Write that second mapping to keep both.
     """
     to: constr(pattern=r'^modelplane_[a-z0-9_]*[a-z0-9]$', max_length=255)
     """
-    What Modelplane calls it. Only modelplane_* leaves a cluster, so a metric with no name here is one nobody downstream can read.
+    The name to export the metric under. Only modelplane_* metrics leave a cluster, so a metric no mapping renames never leaves its cluster.
+    Name it in base units - seconds, bytes, joules, a ratio from nought to one - because that is what `fromUnit` converts to.
     """
 
 
@@ -109,8 +110,7 @@ class Spec(BaseModel):
     """
     metrics: list[Metric] = Field(..., max_length=128, min_length=1)
     """
-    The metrics this component emits, and what Modelplane calls them.
-    Rename only where the measurements agree. Two engines' histograms sharing a name are worth less than nothing if their buckets disagree, because a quantile across them is wrong rather than approximate.
+    The metrics to rename. Give two components' metrics the same name only if they measure the same thing, and histograms only if their buckets match too. A quantile across mismatched buckets is wrong.
     """
 
 
@@ -126,7 +126,7 @@ class Condition(BaseModel):
 class Status(BaseModel):
     clusters: int | None = None
     """
-    How many inference clusters have taken these statements.
+    How many inference clusters apply this mapping.
     """
     conditions: list[Condition] | None = None
     """
@@ -150,7 +150,7 @@ class MetricMapping(BaseModel):
     spec: Spec
     """
     How one component's metrics become part of the modelplane_* surface. Modelplane renders every MetricMapping into each inference cluster's collector, so a mapping is written once on the control plane and reaches the whole fleet.
-    A mapping naming a component Modelplane already provides renames for is additive: its renames run after the built-in ones, and a later rename of the same metric wins.
+    A mapping naming a component Modelplane already provides renames for is additive: its renames run after the built-in ones, on whatever those left behind. A metric a built-in already renamed no longer answers to the name it was emitted under, so a second mapping selecting on that name matches nothing and the built-in stands. Select on the `modelplane_` name instead to rename one of Modelplane's own.
     """
     status: Status | None = None
 

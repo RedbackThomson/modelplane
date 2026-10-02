@@ -37,6 +37,12 @@ CONDITION_REASON_SECRET_NOT_FOUND = "SecretNotFound"
 
 _SECRET_PREFIX = "secret-"
 
+# Where a sink's credential lives on the control plane. Unqualified, the
+# requirement resolves a Secret of that name in any namespace, so a
+# destination would accept a credential that happens to share a name with one
+# in some unrelated namespace while the one it meant is absent.
+_NAMESPACE = "modelplane-system"
+
 
 class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
     """A FunctionRunner handles gRPC RunFunctionRequests."""
@@ -84,6 +90,7 @@ class FunctionRunner(grpcv1.FunctionRunnerServiceServicer):
                 api_version="v1",
                 kind="Secret",
                 match_name=sink.secretRef.name,
+                namespace=_NAMESPACE,
             )
             if key not in req.required_resources:
                 _not_ready(rsp, CONDITION_REASON_WAITING_FOR_SECRET, "Waiting for the credential Secret to resolve")

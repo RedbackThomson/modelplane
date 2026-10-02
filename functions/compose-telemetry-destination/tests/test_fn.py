@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the compose-metric-mapping function."""
+"""Tests for the compose-telemetry-destination function."""
 
 import dataclasses
 import unittest
@@ -27,7 +27,7 @@ from google.protobuf import struct_pb2 as structpb
 
 @dataclasses.dataclass
 class Case:
-    """A test case for compose-metric-mapping."""
+    """A test case for compose-telemetry-destination."""
 
     name: str
     req: fnv1.RunFunctionRequest
@@ -54,12 +54,12 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 "name": name,
                 "type": type_,
                 "endpoint": "https://otel.acme.example",
-                "config": {"auth": {"authenticator": "oidc/acme"}},
+                "config": {"auth": {"authenticator": "oauth2client/acme"}},
                 **({"secretRef": {"name": secret}} if secret else {}),
             }
 
         sinks = [sink()]
-        extensions = {"oidc/acme": {"issuer_url": "https://issuer.acme.example"}}
+        extensions = {"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}}
 
         def xr(spec: dict) -> dict:
             return {
@@ -93,6 +93,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 rsp.requirements.resources["secret-primary"].api_version = "v1"
                 rsp.requirements.resources["secret-primary"].kind = "Secret"
                 rsp.requirements.resources["secret-primary"].match_name = secret
+                # Qualified: unqualified it would resolve a Secret of that
+                # name in any namespace, and accept the wrong credential.
+                rsp.requirements.resources["secret-primary"].namespace = "modelplane-system"
             return rsp
 
         cases = [
@@ -215,7 +218,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                         type="Accepted",
                         status=fnv1.STATUS_CONDITION_FALSE,
                         reason="UnknownAuthenticator",
-                        message="No extension defines oidc/acme, so the collector would refuse to start",
+                        message="No extension defines oauth2client/acme, so the collector would refuse to start",
                     ),
                 ),
             ),

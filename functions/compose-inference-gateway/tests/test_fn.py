@@ -819,7 +819,13 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 "cluster-name-endpoints-prod-ipv4-gateway-aaaaa": {
                     "apiVersion": "v1",
                     "kind": "Endpoints",
-                    "metadata": {"name": "prod-ipv4-gateway-aaaaa", "namespace": fn.REMOTE_NAMESPACE},
+                    "metadata": {
+                        "name": "prod-ipv4-gateway-aaaaa",
+                        "namespace": fn.REMOTE_NAMESPACE,
+                        # Off, or the mirroring controller writes a second
+                        # EndpointSlice over the one composed beside this.
+                        "labels": {"endpointslice.kubernetes.io/skip-mirror": "true"},
+                    },
                     "subsets": [{"addresses": [{"ip": "203.0.113.7"}], "ports": [{"name": "https", "port": 443}]}],
                 },
                 "cluster-name-slice-prod-ipv4-gateway-aaaaa": {
@@ -843,7 +849,13 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                 "cluster-name-endpoints-prod-ipv6-gateway-bbbbb": {
                     "apiVersion": "v1",
                     "kind": "Endpoints",
-                    "metadata": {"name": "prod-ipv6-gateway-bbbbb", "namespace": fn.REMOTE_NAMESPACE},
+                    "metadata": {
+                        "name": "prod-ipv6-gateway-bbbbb",
+                        "namespace": fn.REMOTE_NAMESPACE,
+                        # Off, or the mirroring controller writes a second
+                        # EndpointSlice over the one composed beside this.
+                        "labels": {"endpointslice.kubernetes.io/skip-mirror": "true"},
+                    },
                     "subsets": [{"addresses": [{"ip": "2001:db8::1"}], "ports": [{"name": "https", "port": 443}]}],
                 },
                 "cluster-name-slice-prod-ipv6-gateway-bbbbb": {

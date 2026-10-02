@@ -311,26 +311,36 @@ def _scrape_configs() -> list[dict[str, Any]]:
     ]
 
 
-# What each source unit is worth in the base unit the target name claims.
-# Written as the expression rather than a factor so nothing has to render a
-# float: 1e-09 is not an OTTL literal. Paths carry their context because the
-# collector rewrites bare ones and asks the author to stop; Modelplane is the
-# author here, so nobody's stored MetricMapping has to change.
 # Taking a part of a histogram is a function that mints a new metric beside it,
 # named for the part. The rename then applies to that.
 _PART_FUNCTION = {"Count": "extract_count_metric(true)", "Sum": "extract_sum_metric(true)"}
 _PART_SUFFIX = {"Count": "_count", "Sum": "_sum"}
 
-_UNIT_CONVERSION = {
-    "Millijoules": "datapoint.value_double / 1000",
-    "Milliseconds": "datapoint.value_double / 1000",
-    "Nanoseconds": "datapoint.value_double / 1000000000",
-    "Mebibytes": "datapoint.value_double * 1048576",
+# What one of the source unit is worth in the base unit the target name claims.
+#
+# Applied with scale_metric in the metric context rather than by setting a
+# datapoint's value, because a histogram has no single value to set: its sum,
+# its minimum and maximum, and every one of its bucket boundaries are all in
+# the source unit, and a conversion that reached only the value would rename a
+# histogram to seconds with its buckets still in milliseconds. scale_metric
+# carries all of them, and an integer datapoint as well, which reading
+# value_double would have read as nought.
+#
+# Written out rather than as a Python float so nothing has to render one:
+# 1e-09 is not an OTTL literal. Every one carries a decimal point, because
+# scale_metric takes a float and the collector refuses to start on an integer
+# literal in that position.
+_UNIT_FACTOR = {
+    "Millijoules": "0.001",
+    "Milliseconds": "0.001",
+    "Nanoseconds": "0.000000001",
+    "Mebibytes": "1048576.0",
+    "Percent": "0.01",
 }
 
 
-def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], list[str], list[str]]:
-    """Compile the mappings to OTTL, as (datapoint, metric) statements.
+def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Compile the mappings to OTTL, as (extract, scale, datapoint, metric) statements.
 
     OTTL is rendered here rather than written in a MetricMapping so the kind
     stays a description of what a component emits, and the collector's own
@@ -338,6 +348,7 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
     place that knows a unit conversion has to run somewhere a rename cannot.
     """
     extract: list[str] = []
+    scale: list[str] = []
     datapoint: list[str] = []
     metric: list[str] = []
     for mapping in mappings:
@@ -348,18 +359,32 @@ def statements(mappings: list[mmv1alpha1.MetricMapping]) -> tuple[list[str], lis
                 # extraction mints a new metric, and a label or a unit
                 # conversion for it selects on the name that extraction gives
                 # it - a name that does not exist until the extraction has run.
-                # The histogram carries on untouched.
+                # The extraction leaves the histogram itself alone, though the
+                # filter downstream drops it unless a mapping renames it too.
                 extract.append(f'{_PART_FUNCTION[m.part]} where metric.name == "{source}"')
                 source = f"{source}{_PART_SUFFIX[m.part]}"
             if m.fromUnit:
-                conversion = _UNIT_CONVERSION[m.fromUnit]
-                datapoint.append(f'set(datapoint.value_double, {conversion}) where metric.name == "{source}"')
+                scale.append(f'scale_metric({_UNIT_FACTOR[m.fromUnit]}) where metric.name == "{source}"')
             # Labels before the rename, while the series still answers to the
             # name this mapping selected on. After it, two folded mappings share
             # one name and a statement could no longer tell them apart.
             datapoint.extend(_label_statements(source, m.labels or []))
             metric.append(f'set(metric.name, "{m.to}") where metric.name == "{source}"')
-    return extract, datapoint, metric
+    return extract, scale, datapoint, metric
+
+
+def _quote(value: str) -> str:
+    """One OTTL string literal, with anything that would end it escaped.
+
+    A metric name and a label name are pattern-constrained by the XRD, but a
+    label's value is free text, and so is every key and value of a `values`
+    remap - they have to be, because they carry whatever vocabulary the
+    component already emits. An unescaped quote in one of them would close the
+    literal early and leave the rest of it as OTTL, which at best stops the
+    collector from starting and at worst runs.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _label_statements(source: str, labels: list[Any]) -> list[str]:
@@ -367,33 +392,49 @@ def _label_statements(source: str, labels: list[Any]) -> list[str]:
     out: list[str] = []
     for label in labels:
         if label.value is not None:
-            out.append(f'set(datapoint.attributes["{label.name}"], "{label.value}") where metric.name == "{source}"')
+            out.append(
+                f'set(datapoint.attributes["{label.name}"], {_quote(label.value)}) where metric.name == "{source}"'
+            )
             continue
         carried = f'datapoint.attributes["{label.from_}"]'
         out.append(f'set(datapoint.attributes["{label.name}"], {carried}) where metric.name == "{source}"')
         for old, new in sorted((label.values or {}).items()):
             out.append(
-                f'set(datapoint.attributes["{label.name}"], "{new}") '
-                f'where metric.name == "{source}" and {carried} == "{old}"'
+                f'set(datapoint.attributes["{label.name}"], {_quote(new)}) '
+                f'where metric.name == "{source}" and {carried} == {_quote(old)}'
             )
         # The component's own name for it goes, or the series carries the same
-        # fact twice under two labels and costs twice the cardinality.
-        out.append(f'delete_key(datapoint.attributes, "{label.from_}") where metric.name == "{source}"')
+        # fact twice under two labels and costs twice the cardinality. Unless
+        # the mapping carried the label onto its own name, which is how a pure
+        # value remap is written: there the delete would take the label the
+        # statements above just set.
+        if label.from_ != label.name:
+            out.append(f'delete_key(datapoint.attributes, "{label.from_}") where metric.name == "{source}"')
     return out
 
 
 def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
-    """Unit conversions first, then every rename.
+    """Parts extracted, then units converted, then labels, then every rename.
 
-    Two blocks rather than one list: a statement reaching a datapoint's value
-    can't run in the metric context, and the processor finishes a block over
-    every datapoint before it starts the next, which is what keeps a rename
-    from stranding the datapoints a conversion hasn't reached yet.
+    Four blocks rather than one list. Each block finishes over every metric
+    before the next one starts, and each step here depends on the one before
+    having finished everywhere: an extraction mints the metric a conversion
+    scales, a conversion has to reach a datapoint the rename would otherwise
+    have stranded in the source unit, and a label has to be set while the
+    series still answers to the name its mapping selected on. A statement
+    reaching a datapoint's attributes also can't run in the metric context.
+
+    The conversions ignore their own errors. scale_metric refuses an
+    exponential histogram, and under the default error mode that one refusal
+    would drop the whole batch - every metric from every pod in the scrape,
+    not just the one it could not convert.
     """
-    extract, datapoint, metric = statements(mappings)
+    extract, scale, datapoint, metric = statements(mappings)
     blocks: list[dict[str, Any]] = []
     if extract:
         blocks.append({"context": "metric", "statements": extract})
+    if scale:
+        blocks.append({"context": "metric", "error_mode": "ignore", "statements": scale})
     if datapoint:
         blocks.append({"context": "datapoint", "statements": datapoint})
     blocks.append({"context": "metric", "statements": metric})
@@ -409,9 +450,17 @@ def _transform(mappings: list[mmv1alpha1.MetricMapping]) -> dict[str, Any]:
 #
 # Applied under an operator's own config rather than over it: this is a default,
 # and a sink that sets it wins.
+#
+# Keyed under both spellings of the remote-write exporter. The component
+# registers as prometheus_remote_write and still answers to the older
+# prometheusremotewrite, so a sink writing the name the collector's own
+# documentation gives would otherwise match nothing here and export every
+# series stripped of its identity - a silent loss, since the sink itself works.
+_RESOURCE_TO_LABELS = {"resource_to_telemetry_conversion": {"enabled": True}}
 _SINK_DEFAULTS = {
-    "prometheusremotewrite": {"resource_to_telemetry_conversion": {"enabled": True}},
-    "prometheus": {"resource_to_telemetry_conversion": {"enabled": True}},
+    "prometheus_remote_write": _RESOURCE_TO_LABELS,
+    "prometheusremotewrite": _RESOURCE_TO_LABELS,
+    "prometheus": _RESOURCE_TO_LABELS,
 }
 
 

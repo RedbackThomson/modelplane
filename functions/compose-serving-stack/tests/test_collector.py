@@ -24,7 +24,9 @@ from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
 from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 from pydantic import ValidationError
 
-_EXTENSIONS = {"oidc/acme": {"issuer_url": "https://issuer.acme.example"}}
+# A client authenticator: an exporter needs one of those, not the oidc
+# extension, which authenticates callers of a receiver.
+_EXTENSIONS = {"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}}
 
 
 def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> tdv1alpha1.Sink:
@@ -42,15 +44,16 @@ _SINKS = [_sink()]
 
 
 def _metric_statements() -> list[str]:
-    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[2]
+    """The rename statements, which are the last of the four blocks."""
+    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[-1]
 
 
-def _config(*, extensions: dict | None = None) -> dict:
+def _config(*, extensions: dict | None = None, sinks: list | None = None) -> dict:
     return yaml.safe_load(
         collector.config(
             "prod-us-east",
             list(stacks.BUILTIN_MAPPINGS),
-            _SINKS,
+            _SINKS if sinks is None else sinks,
             _EXTENSIONS if extensions is None else extensions,
         )
     )
@@ -147,11 +150,12 @@ class TestConfig(unittest.TestCase):
         )
         blocks = collector._transform([mapping])["metric_statements"]
         contexts = [b["context"] for b in blocks]
-        self.assertEqual(contexts, ["metric", "datapoint", "metric"])
+        self.assertEqual(contexts, ["metric", "metric", "datapoint", "metric"])
         self.assertIn("extract_count_metric", blocks[0]["statements"][0])
         # Everything selecting on the extracted name comes after the extraction.
-        for statement in blocks[1]["statements"]:
-            self.assertIn("my_engine_duration_ms_count", statement)
+        for block in blocks[1:]:
+            for statement in block["statements"]:
+                self.assertIn("my_engine_duration_ms_count", statement)
 
     def test_every_job_carries_something_unique_to_its_target(self) -> None:
         """Two producers whose series are identical are one series, and one is lost.
@@ -196,23 +200,76 @@ class TestConfig(unittest.TestCase):
         jobs = [j["job_name"] for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]]
         self.assertIn("modelplane-gateway", jobs)
 
+    def test_both_spellings_of_remote_write_keep_their_identity(self) -> None:
+        """The exporter registers as prometheus_remote_write in 0.161.0.
+
+        prometheusremotewrite is the older name it still answers to. A sink
+        writing the one the collector's own documentation gives would
+        otherwise match no default here and export every series stripped of
+        the cluster, deployment, engine and role it belongs to - silently,
+        because the sink itself works.
+        """
+        for type_ in ("prometheus_remote_write", "prometheusremotewrite", "prometheus"):
+            with self.subTest(type=type_):
+                exporters = _config(sinks=[_sink(type_=type_)])["exporters"]
+                exporter = next(v for k, v in exporters.items() if k.startswith(f"{type_}/"))
+                self.assertTrue(exporter["resource_to_telemetry_conversion"]["enabled"])
+
     def test_extensions_are_declared_to_the_service(self) -> None:
         """An authenticator the service doesn't list is one the collector won't load."""
-        self.assertEqual(_config()["service"]["extensions"], ["oidc/acme"])
+        self.assertEqual(_config()["service"]["extensions"], ["oauth2client/acme"])
         self.assertNotIn("extensions", _config(extensions={})["service"])
 
     def test_energy_is_scaled_before_it_is_renamed(self) -> None:
         """DCGM counts millijoules, and the name says joules.
 
         The scale is a block ahead of the renames, not a line ahead. The
-        processor finishes a block over every datapoint before the next one
-        starts, so a rename sharing the block would strand every datapoint
+        processor finishes a block over every metric before the next one
+        starts, so a rename sharing the block would strand every metric
         after the first at millijoules.
         """
         blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-        self.assertEqual([b["context"] for b in blocks], ["datapoint", "metric"])
-        self.assertTrue(any("value_double / 1000" in st for st in blocks[0]["statements"]))
-        self.assertTrue(any("modelplane_energy_joules_total" in st for st in blocks[1]["statements"]))
+        self.assertEqual([b["context"] for b in blocks], ["metric", "metric"])
+        self.assertTrue(any("scale_metric(0.001)" in st for st in blocks[0]["statements"]))
+        self.assertTrue(any("modelplane_energy_joules_total" in st for st in blocks[-1]["statements"]))
+
+    def test_a_conversion_reaches_a_histogram_bucket(self) -> None:
+        """Setting value_double converts a gauge and leaves a histogram lying.
+
+        A histogram holds its measurements in its sum, its minimum and maximum
+        and every bucket boundary, none of which is value_double. Renaming one
+        to seconds with its buckets still at milliseconds puts every quantile
+        a thousand times out, and nothing says so.
+        """
+        blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
+        for block in blocks:
+            for statement in block["statements"]:
+                self.assertNotIn("value_double", statement)
+        scales = next(b for b in blocks if any("scale_metric" in st for st in b["statements"]))
+        self.assertEqual(scales["context"], "metric")
+
+    def test_every_conversion_factor_is_a_float_literal(self) -> None:
+        """scale_metric takes a float, and 1048576 is an integer to OTTL.
+
+        The collector refuses to start on it - "must be a float" - which
+        takes the whole cluster's telemetry down, and nothing short of
+        running the collector catches it.
+        """
+        for unit, factor in collector._UNIT_FACTOR.items():
+            with self.subTest(unit=unit):
+                self.assertIn(".", factor, "an OTTL float literal needs a decimal point")
+                float(factor)
+
+    def test_a_conversion_cannot_drop_the_batch_it_rides_in(self) -> None:
+        """scale_metric refuses an exponential histogram.
+
+        Under the default error mode that one refusal fails the whole batch:
+        every metric from every pod in the scrape is lost, not the one it
+        could not convert.
+        """
+        blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
+        scales = next(b for b in blocks if any("scale_metric" in st for st in b["statements"]))
+        self.assertEqual(scales["error_mode"], "ignore")
 
     def test_dcgm_units_are_converted_to_the_unit_the_name_claims(self) -> None:
         """DCGM reports mJ and MiB; the names say joules and bytes."""
@@ -225,7 +282,31 @@ class TestConfig(unittest.TestCase):
         """A unit the API accepts with no conversion here is a KeyError at render time."""
         annotation = mmv1alpha1.Metric.model_fields["fromUnit"].annotation
         literal = next(a for a in typing.get_args(annotation) if typing.get_origin(a) is typing.Literal)
-        self.assertEqual(set(typing.get_args(literal)), set(collector._UNIT_CONVERSION))
+        self.assertEqual(set(typing.get_args(literal)), set(collector._UNIT_FACTOR))
+
+    def test_a_percentage_is_divided_into_a_ratio(self) -> None:
+        """A component counting 0 to 100 under a name that says a ratio is 100x out.
+
+        vLLM and SGLang both publish a fraction, so no built-in needs this, but
+        vLLM's is called kv_cache_usage_perc - the name is no guide, and an
+        engine that means it has to be able to say so.
+        """
+        mapping = mmv1alpha1.MetricMapping.model_validate(
+            {
+                "spec": {
+                    "metrics": [
+                        {
+                            "from": "my_engine_cache_percent",
+                            "to": "modelplane_kv_cache_utilization_ratio",
+                            "acrossReplicas": "Mean",
+                            "fromUnit": "Percent",
+                        }
+                    ]
+                }
+            }
+        )
+        _, scale, _, _ = collector.statements([mapping])
+        self.assertEqual(scale, ['scale_metric(0.01) where metric.name == "my_engine_cache_percent"'])
 
     def test_a_metric_name_cannot_end_the_comparison_early(self) -> None:
         """A quote in `from` would rename whatever the rest of the line matched."""
@@ -240,6 +321,57 @@ class TestConfig(unittest.TestCase):
                 )
                 self.assertEqual(round_tripped.from_, m.from_)
 
+    def test_a_label_value_cannot_end_the_string_it_sits_in(self) -> None:
+        """`from` is pattern-constrained; a label's value cannot be.
+
+        A value and a `values` remap carry whatever vocabulary the component
+        already writes, so the schema has to take free text. A quote in one
+        would close the OTTL literal early and leave the remainder of the
+        value as OTTL - at best the collector refuses to start.
+        """
+        mapping = mmv1alpha1.MetricMapping.model_validate(
+            {
+                "spec": {
+                    "metrics": [
+                        {
+                            "from": "my_engine_finish",
+                            "to": "modelplane_requests_total",
+                            "acrossReplicas": "Sum",
+                            "labels": [{"name": "reason", "from": "finish", "values": {'ab"c': 'x"y'}}],
+                        }
+                    ]
+                }
+            }
+        )
+        _, _, datapoint, _ = collector.statements([mapping])
+        joined = " ".join(datapoint)
+        self.assertIn(r'"ab\"c"', joined)
+        self.assertIn(r'"x\"y"', joined)
+
+    def test_carrying_a_label_onto_itself_keeps_it(self) -> None:
+        """`from` equal to `name` is how a mapping remaps values in place.
+
+        The delete that stops a carried label costing twice the cardinality
+        would otherwise take the label the statements before it just set, and
+        the series would lose the label entirely.
+        """
+        mapping = mmv1alpha1.MetricMapping.model_validate(
+            {
+                "spec": {
+                    "metrics": [
+                        {
+                            "from": "my_engine_finish",
+                            "to": "modelplane_requests_total",
+                            "acrossReplicas": "Sum",
+                            "labels": [{"name": "reason", "from": "reason", "values": {"eos": "stop"}}],
+                        }
+                    ]
+                }
+            }
+        )
+        _, _, datapoint, _ = collector.statements([mapping])
+        self.assertFalse([st for st in datapoint if st.startswith("delete_key")])
+
     def test_a_value_rewrite_never_lands_in_the_metric_context(self) -> None:
         """value_double is a datapoint path; the collector refuses to start on it here."""
         blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
@@ -249,6 +381,27 @@ class TestConfig(unittest.TestCase):
             for st in block["statements"]:
                 self.assertNotIn("set(name,", st)
                 self.assertNotIn("set(value_double,", st)
+
+    def test_sglang_carries_no_queue_time_or_preemption(self) -> None:
+        """SGLang publishes neither, so there is nothing to rename onto them.
+
+        Checked against a running SGLang v0.4.9.post2: it has no per-request
+        queue-time metric and no retraction counters at all. The nearest
+        thing, sglang:avg_request_queue_latency, is a gauge of the mean over
+        the last batch - a different measurement from vLLM's per-request
+        histogram, and one name holding both makes a fleet quantile
+        meaningless.
+        """
+        sglang = {
+            m.from_: m.to
+            for mapping in stacks.BUILTIN_MAPPINGS
+            for m in mapping.spec.metrics
+            if m.from_.startswith("sglang:")
+        }
+        self.assertTrue(sglang, "the SGLang built-in went missing")
+        self.assertNotIn("modelplane_request_queue_seconds", sglang.values())
+        self.assertNotIn("modelplane_requests_preempted_total", sglang.values())
+        self.assertFalse([k for k in sglang if "retracted" in k or "queue_time" in k])
 
     def test_sglang_latency_histograms_are_not_renamed(self) -> None:
         """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""

@@ -37,20 +37,21 @@ spec:
 
               A mapping naming a component Modelplane already provides
               renames for is additive: its renames run after the built-in
-              ones, and a later rename of the same metric wins.
+              ones, on whatever those left behind. A metric a built-in
+              already renamed no longer answers to the name it was emitted
+              under, so a second mapping selecting on that name matches
+              nothing and the built-in stands. Select on the `modelplane_`
+              name instead to rename one of Modelplane's own.
             properties:
               metrics:
                 type: array
                 minItems: 1
                 maxItems: 128
                 description: >-
-                  The metrics this component emits, and what Modelplane calls
-                  them.
-
-                  Rename only where the measurements agree. Two engines'
-                  histograms sharing a name are worth less than nothing if
-                  their buckets disagree, because a quantile across them is
-                  wrong rather than approximate.
+                  The metrics to rename. Give two components' metrics the same
+                  name only if they measure the same thing, and histograms only
+                  if their buckets match too. A quantile across mismatched
+                  buckets is wrong.
                 items:
                   type: object
                   required: [from, to, acrossReplicas]
@@ -60,24 +61,25 @@ spec:
                       maxLength: 255
                       pattern: '^[a-zA-Z_:][a-zA-Z0-9_:]*$'
                       description: >-
-                        The metric's name as the component emits it, matched
-                        exactly. Nothing here declares which engine a
-                        deployment runs: a name that no component emits simply
-                        matches nothing.
+                        The metric's name as the component exposes it, matched
+                        exactly wherever it appears in the fleet.
 
-                        Held to the characters a metric name can contain. The
-                        name is matched inside the collector's own query
-                        language, so a quote here would end the comparison
-                        early and rename whatever the rest of the line
-                        matched.
+                        A histogram is named by its base name, without the
+                        _count, _sum or _bucket a Prometheus query would use:
+                        the collector holds it as one metric, and `part` is
+                        what reaches into it.
                     to:
                       type: string
                       maxLength: 255
                       pattern: '^modelplane_[a-z0-9_]*[a-z0-9]$'
                       description: >-
-                        What Modelplane calls it. Only modelplane_* leaves a
-                        cluster, so a metric with no name here is one nobody
-                        downstream can read.
+                        The name to export the metric under. Only modelplane_*
+                        metrics leave a cluster, so a metric no mapping renames
+                        never leaves its cluster.
+
+                        Name it in base units - seconds, bytes, joules, a ratio
+                        from nought to one - because that is what `fromUnit`
+                        converts to.
                     acrossReplicas:
                       type: string
                       enum: [Sum, Mean, Max]
@@ -114,26 +116,28 @@ spec:
                         the histogram measures request duration. Sum is their
                         total.
 
-                        The histogram carries on unchanged under its own name.
-                        This adds a series beside it.
+                        The extraction leaves the histogram alone, but the
+                        collector exports only what a mapping renames, so the
+                        histogram itself is dropped unless another mapping
+                        gives it a `modelplane_` name of its own. Write that
+                        second mapping to keep both.
                     labels:
                       type: array
                       maxItems: 16
                       description: >-
-                        Labels to set on the series, for folding several
-                        metrics into one that a label tells apart - tokens in
-                        and out under one name with a direction, responses
-                        under one name with the reason they ended.
-
-                        Two mappings writing the same `to` with a different
-                        fixed value is how the fold is expressed: each renames
-                        its own source and stamps its own value.
+                        Labels to set on this metric's series. To fold several
+                        metrics into one name, give each its own entry with
+                        the same `to` and a different fixed value, such as
+                        direction: input and direction: output on
+                        modelplane_tokens_total.
                       items:
                         type: object
                         required: [name]
                         x-kubernetes-validations:
                         - rule: "has(self.value) != has(self.from)"
                           message: set either value, for a fixed label, or from, to carry one the component already emits.
+                        - rule: "!has(self.values) || has(self.from)"
+                          message: values remaps what from carries, so it needs from. A fixed value has nothing to remap.
                         properties:
                           name:
                             type: string
@@ -152,9 +156,13 @@ spec:
                             maxLength: 63
                             pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$'
                             description: >-
-                              A label the component already emits, carried onto
-                              the new name and dropped from the series under
-                              its old one.
+                              A label the component already emits. Modelplane
+                              copies its value into this label and removes the
+                              original.
+
+                              Naming the label itself keeps it: that is how
+                              `values` rewrites what a component writes without
+                              renaming the label.
                           values:
                             type: object
                             maxProperties: 32
@@ -166,31 +174,31 @@ spec:
                               putting an engine's own vocabulary into
                               Modelplane's. A value with no entry here is left
                               as the component wrote it.
-
-                              Only meaningful alongside `from`.
                     fromUnit:
                       type: string
-                      enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds]
+                      enum: [Millijoules, Mebibytes, Milliseconds, Nanoseconds, Percent]
                       description: >-
                         What the component measures this in, when that isn't
                         the unit the name claims. Modelplane converts to the
                         base unit: millijoules and milliseconds are divided by
-                        a thousand, nanoseconds by a billion, and mebibytes
-                        multiplied out to bytes.
+                        a thousand, nanoseconds by a billion, percent by a
+                        hundred, and mebibytes multiplied out to bytes. A
+                        histogram is converted whole - its sum, its bounds and
+                        its bucket boundaries - so its quantiles come out in
+                        the target unit too.
 
-                        Say it whenever the source disagrees with the target,
-                        even where the factor looks obvious. A name ending in
-                        _bytes that holds mebibytes is the kind of thing
-                        nobody notices until a capacity review, and stating
-                        the source unit is what makes the conversion happen at
-                        all.
+                        Percent is for a component that counts a saturation
+                        from nought to a hundred where the name says a ratio.
+                        Check rather than assume: vLLM publishes
+                        kv_cache_usage_perc and the value is a fraction, so a
+                        name is no guide.
           status:
             type: object
             properties:
               clusters:
                 type: integer
                 description: >-
-                  How many inference clusters have taken these statements.
+                  How many inference clusters apply this mapping.
               conditions:
                 type: array
                 items:

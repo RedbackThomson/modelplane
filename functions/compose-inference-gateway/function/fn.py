@@ -878,6 +878,12 @@ class Composer:
         #
         # Deprecated since 1.33 and still the only thing kube-dns reads. It
         # costs one object; getting it wrong costs every request to the cluster.
+        #
+        # Mirroring is turned off on it. The endpointslice mirroring controller
+        # copies a hand-written Endpoints into an EndpointSlice of its own, and
+        # the slice above already is that slice: left on, two controllers write
+        # the same address for the same Service and each keeps correcting the
+        # other's object.
         resource.update(
             self.rsp.desired.resources[f"cluster-name-endpoints-{label}"],
             _k8s_object(
@@ -885,7 +891,11 @@ class Composer:
                 {
                     "apiVersion": "v1",
                     "kind": "Endpoints",
-                    "metadata": {"name": label, "namespace": REMOTE_NAMESPACE},
+                    "metadata": {
+                        "name": label,
+                        "namespace": REMOTE_NAMESPACE,
+                        "labels": {"endpointslice.kubernetes.io/skip-mirror": "true"},
+                    },
                     "subsets": [
                         {
                             "addresses": [{"ip": address}],

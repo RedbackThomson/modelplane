@@ -52,25 +52,25 @@ class Auth(BaseModel):
 class SecretRef(BaseModel):
     name: constr(max_length=253)
     """
-    Name of the Secret, in Modelplane's namespace.
+    Name of the Secret, in modelplane-system on the control plane. Modelplane copies it to every cluster running a collector, so it doesn't have to exist on each of them already.
     """
 
 
 class Sink(BaseModel):
     auth: Auth | None = None
     """
-    How to authenticate, for the schemes Modelplane composes. The collector takes no credential inline: it authenticates through an extension an exporter names, so setting this composes that extension and wires the reference.
-    A scheme that isn't here is still reachable. Define the extension yourself under spec.extensions and name it from this sink's config, which is what Modelplane does on your behalf.
+    Authentication Modelplane sets up for this sink, using a credential from `secretRef`. For another scheme, define an authenticator under spec.extensions and reference it from `config`.
+    Set here, it wins: Modelplane applies it over an `auth` block in `config`, so a sink's credential cannot be quietly unpicked.
     """
     config: dict[str, Any] | None = None
     """
-    Anything else that exporter takes, passed through unread: TLS, retry, queueing, compression, headers.
-    Modelplane does not model an exporter's configuration, because the schema is OpenTelemetry's and versioned separately. Typing it would mean a Modelplane release for each setting the collector gains, and would drop the ones this has never heard of. What is typed above is what belongs to Modelplane: which sinks exist, what each is called, where it writes, and which Secret it reads.
+    The rest of the exporter's configuration, passed through as written: TLS, retries, queueing, compression, headers.
+    Modelplane sets one default, for the exporters that flatten a series into labels: prometheus and prometheus_remote_write get resource_to_telemetry_conversion, or they would receive every series stripped of the cluster, deployment, engine and role it belongs to. Setting it here overrides that.
     """
     endpoint: constr(max_length=2048) | None = None
     """
-    Where this sink writes. Typed rather than left to the configuration below because it is the setting every destination has to get right, and the one worth catching here rather than in a collector that won't start.
-    Optional, because not every exporter addresses its destination this way: Kafka takes brokers, the file exporter a path, and the debug exporter nothing at all. Those go in the configuration below, under the names that exporter gives them.
+    Where this sink writes. Leave it unset for an exporter that doesn't take an endpoint, such as kafka or debug, and configure it in `config` instead.
+    Set here, it wins: Modelplane applies it over `config`, so a sink cannot be quietly redirected by the configuration passed through beside it.
     """
     name: constr(pattern=r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$', max_length=63)
     """
@@ -78,12 +78,11 @@ class Sink(BaseModel):
     """
     secretRef: SecretRef | None = None
     """
-    A Secret holding this sink's credential. Its keys reach the collector as files under /etc/modelplane/telemetry/<sink name>/, and as environment variables, for configuration above referring to ${env:TOKEN}.
-    Per sink rather than per destination, so two sinks with different credentials don't have to share one Secret and tell their keys apart by prefix. The files are per sink; the environment variables are not, so two Secrets sharing a key name still collide there and the file is the one to read.
+    A Secret holding this sink's credentials. Modelplane mounts each key as a file under /etc/modelplane/telemetry/<sink name>/ and sets it as an environment variable for ${env:KEY} references in `config`. All sinks share one environment, so where two Secrets have the same key, refer to the file.
     """
     type: constr(max_length=63)
     """
-    The collector exporter to send with, by the name OpenTelemetry gives it: otlphttp, otlp, prometheusremotewrite, kafka, and every other one the collector provides.
+    The collector exporter to send with, by the name OpenTelemetry gives it: otlphttp, otlp, prometheus_remote_write, kafka, and every other one the collector provides.
     Not an enum, because enumerating them here would mean a Modelplane release for each exporter the collector gains, and the collector already refuses to start on a name it doesn't have.
     """
 
@@ -95,7 +94,8 @@ class Spec(BaseModel):
     """
     extensions: dict[str, Any] | None = None
     """
-    The collector's extensions block, passed through unread, for the authenticator a sink references. Bearer token, basic auth, OIDC and SigV4 all work, because none of them is modelled here.
+    Collector extensions, passed through as written. Use it to define an authenticator that a sink's `config` references.
+    An exporter needs a client authenticator - basicauth, oauth2client, sigv4auth, headers_setter. The oidc extension authenticates callers of a receiver, so it is not one of these.
     """
     sinks: list[Sink] = Field(..., max_length=16, min_length=1)
     """
@@ -134,8 +134,8 @@ class TelemetryDestination(BaseModel):
     """
     spec: Spec
     """
-    Where the fleet's telemetry goes. Modelplane composes no collectors until a TelemetryDestination exists: neither tier stores anything, so collecting with nowhere to export would spend GPU-cluster memory on samples nobody reads. Creating one turns collection on everywhere at once.
-    There is no per-deployment opt-out. A ModelDeployment's author owns neither the destination nor its bill.
+    Where the fleet's metrics go. Modelplane runs no collectors until a TelemetryDestination exists, and creating one turns on collection on every inference cluster.
+    Several can exist. Their sinks are concatenated into one collector configuration, so adding a backend is a new object rather than an edit to one somebody else owns. A sink's name is the collector's name for its exporter, so it has to be unique across destinations.
     """
     status: Status | None = None
 
