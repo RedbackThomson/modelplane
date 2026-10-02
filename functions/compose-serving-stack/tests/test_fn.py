@@ -1588,3 +1588,75 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
         selector = got.requirements.resources["collector-secret-primary"]
         self.assertEqual(selector.match_name, "telemetry-credentials")
         self.assertEqual(selector.namespace, "modelplane-system")
+
+    async def test_every_destination_contributes_its_sinks(self) -> None:
+        """A second backend is a second object, not an edit to a singleton.
+
+        Picking one destination and warning about the rest means a team
+        adding an export has to edit an object another team owns, and gets
+        silence if they create their own instead.
+        """
+        req = _request("GKE", "Standard", observed=_observed_pcs())
+        for name, sink in (
+            ("acme", {"name": "vendor", "type": "otlphttp", "endpoint": "https://otel.vendor.example"}),
+            ("zeta", {"name": "prom", "type": "prometheus_remote_write", "endpoint": "https://p.example/w"}),
+        ):
+            req.required_resources["destinations"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "modelplane.ai/v1alpha1",
+                            "kind": "TelemetryDestination",
+                            "metadata": {"name": name},
+                            "spec": {"sinks": [sink]},
+                        }
+                    )
+                )
+            )
+        req.required_resources["mappings"].items.extend([])
+        got = await self.runner.RunFunction(req, None)
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertEqual(
+            sorted(config["exporters"]),
+            ["otlphttp/vendor", "prometheus_remote_write/prom"],
+        )
+        self.assertEqual(
+            sorted(config["service"]["pipelines"]["metrics"]["exporters"]),
+            ["otlphttp/vendor", "prometheus_remote_write/prom"],
+        )
+
+    async def test_two_destinations_cannot_name_one_exporter(self) -> None:
+        """A sink names the collector's exporter instance.
+
+        Two of them under one name is one exporter with two meanings. The
+        destination sorting first keeps it and the other is dropped with a
+        warning, rather than failing the whole fleet's telemetry over a name.
+        """
+        req = _request("GKE", "Standard", observed=_observed_pcs())
+        for name, endpoint in (("acme", "https://a.example"), ("zeta", "https://z.example")):
+            req.required_resources["destinations"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "modelplane.ai/v1alpha1",
+                            "kind": "TelemetryDestination",
+                            "metadata": {"name": name},
+                            "spec": {"sinks": [{"name": "primary", "type": "otlphttp", "endpoint": endpoint}]},
+                        }
+                    )
+                )
+            )
+        req.required_resources["mappings"].items.extend([])
+        got = await self.runner.RunFunction(req, None)
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertEqual(list(config["exporters"]), ["otlphttp/primary"])
+        self.assertEqual(config["exporters"]["otlphttp/primary"]["endpoint"], "https://a.example")
+        self.assertTrue([r for r in got.results if "zeta" in r.message])

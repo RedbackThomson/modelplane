@@ -34,6 +34,8 @@ the gateway pair, its PKI, and the Usages sequencing the pair's teardown
 ahead of the Envoy Gateway release.
 """
 
+from typing import Any
+
 import grpc
 from crossplane.function import logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
@@ -796,8 +798,8 @@ class Composer:
             return
 
         # Sorted, not whichever the API server listed first: the collector
-        # restarts on a change to its rendered config, so an unstable choice
-        # between two destinations would redeploy it on alternate reconciles.
+        # restarts on a change to its rendered config, so an unstable order
+        # would redeploy it on alternate reconciles.
         destinations = sorted(
             (
                 tdv1alpha1.TelemetryDestination.model_validate(d)
@@ -807,15 +809,7 @@ class Composer:
         )
         if not destinations:
             return
-        dest = destinations[0]
-        if len(destinations) > 1:
-            # Which one wins would otherwise be whichever the API server listed
-            # first, and a fleet would export somewhere nobody chose.
-            response.warning(
-                self.rsp,
-                f"{len(destinations)} TelemetryDestinations exist; using "
-                f"{_name(dest.metadata)}. Telemetry has one destination per fleet.",
-            )
+        sinks, extensions = self.merge_destinations(destinations)
 
         # The collector mounts each sink's credential as a Secret in its own
         # namespace on this cluster, and the operator wrote one Secret, on the
@@ -824,7 +818,7 @@ class Composer:
         # pod never starts, which is the one failure mode a destination with a
         # credential would always hit.
         secrets: dict[str, tuple[str, dict]] = {}
-        for sink in dest.spec.sinks:
+        for sink in sinks:
             if sink.secretRef is None:
                 continue
             key = f"collector-secret-{sink.name}"
@@ -858,8 +852,8 @@ class Composer:
         for key, manifest, cel in collector.objects(
             cluster=_cluster_name(self.xr),
             mappings=mappings,
-            sinks=list(dest.spec.sinks),
-            extensions=dict(dest.spec.extensions or {}),
+            sinks=sinks,
+            extensions=extensions,
         ):
             if not (pc_observed or key in self.req.observed.resources):
                 continue
@@ -895,6 +889,45 @@ class Composer:
                 ),
             )
             self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+
+    def merge_destinations(
+        self, destinations: list[tdv1alpha1.TelemetryDestination]
+    ) -> tuple[list[tdv1alpha1.Sink], dict[str, Any]]:
+        """Every destination's sinks and extensions, as one collector config.
+
+        Concatenated rather than one of them chosen, so a second backend is a
+        second object rather than an edit to a singleton somebody else owns.
+        Every sink gets the whole stream either way, so the fleet exports to
+        all of them.
+
+        A sink names the collector's exporter instance, and two destinations
+        naming a sink the same way would be one exporter with two meanings.
+        The destination that sorts first keeps the name and the other is
+        dropped with a warning, because taking the whole fleet's telemetry
+        down over a name collision is the worse failure. Extensions collide
+        the same way and resolve the same way.
+        """
+        sinks: dict[str, tdv1alpha1.Sink] = {}
+        extensions: dict[str, Any] = {}
+        clashes: list[str] = []
+        for dest in destinations:
+            name = _name(dest.metadata)
+            for sink in dest.spec.sinks:
+                if sink.name in sinks:
+                    clashes.append(f"sink {sink.name} in TelemetryDestination {name}")
+                    continue
+                sinks[sink.name] = sink
+            for key, value in (dest.spec.extensions or {}).items():
+                if key in extensions:
+                    clashes.append(f"extension {key} in TelemetryDestination {name}")
+                    continue
+                extensions[key] = value
+        if clashes:
+            response.warning(
+                self.rsp,
+                f"Ignored {', '.join(clashes)}: already defined by a TelemetryDestination sorting earlier.",
+            )
+        return list(sinks.values()), extensions
 
     def compose_gateway_usages(self) -> None:
         """Compose Usages ordering the hand-rendered gateway teardown.
