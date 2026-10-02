@@ -1660,3 +1660,37 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(config["exporters"]), ["otlphttp/primary"])
         self.assertEqual(config["exporters"]["otlphttp/primary"]["endpoint"], "https://a.example")
         self.assertTrue([r for r in got.results if "zeta" in r.message])
+
+    async def test_a_stale_mapping_does_not_break_the_stack(self) -> None:
+        """A CRD validates on write, not on what it already stored.
+
+        A MetricMapping written before acrossReplicas was required still
+        comes back on read without it. Parsing it raises, and raising fails
+        the whole pipeline step - so the serving stack composes nothing and
+        the fleet stops placing replicas, because one telemetry object is out
+        of date. Seen on a real cluster.
+        """
+        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+        req.required_resources["mappings"].items.append(
+            fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    {
+                        "apiVersion": "modelplane.ai/v1alpha1",
+                        "kind": "MetricMapping",
+                        "metadata": {"name": "stale"},
+                        # No acrossReplicas: the schema requires it now.
+                        "spec": {"metrics": [{"from": "old_engine_waiting", "to": "modelplane_requests_waiting"}]},
+                    }
+                )
+            )
+        )
+        got = await self.runner.RunFunction(req, None)
+        # The stack still composes, and says what it dropped.
+        self.assertIn("collector", got.desired.resources)
+        self.assertTrue([r for r in got.results if "stale" in r.message])
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertNotIn("old_engine_waiting", yaml.safe_dump(config))

@@ -34,9 +34,10 @@ the gateway pair, its PKI, and the Usages sequencing the pair's teardown
 ahead of the Envoy Gateway release.
 """
 
-from typing import Any
+from typing import Any, TypeVar
 
 import grpc
+import pydantic
 from crossplane.function import logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
@@ -53,6 +54,9 @@ from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 from function import collector, gateway, stacks
+
+# The Pydantic model one required resource is parsed into.
+_T = TypeVar("_T", bound=pydantic.BaseModel)
 
 # Label key every rendered Release and Object carries, valued with its
 # composed-resource key, so Usage resourceSelectors can name any
@@ -801,10 +805,7 @@ class Composer:
         # restarts on a change to its rendered config, so an unstable order
         # would redeploy it on alternate reconciles.
         destinations = sorted(
-            (
-                tdv1alpha1.TelemetryDestination.model_validate(d)
-                for d in request.get_required_resources(self.req, "destinations")
-            ),
+            self._parse("TelemetryDestination", tdv1alpha1.TelemetryDestination, "destinations"),
             key=lambda d: _name(d.metadata),
         )
         if not destinations:
@@ -843,9 +844,7 @@ class Composer:
         # Modelplane's own mappings first, then the operator's, which add to
         # them rather than replacing them.
         mappings = list(stacks.BUILTIN_MAPPINGS)
-        mappings += [
-            mmv1alpha1.MetricMapping.model_validate(m) for m in request.get_required_resources(self.req, "mappings")
-        ]
+        mappings += self._parse("MetricMapping", mmv1alpha1.MetricMapping, "mappings")
 
         pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
@@ -889,6 +888,33 @@ class Composer:
                 ),
             )
             self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+
+    def _parse(self, kind: str, model: type[_T], key: str) -> list[_T]:
+        """Parse the required resources under `key`, skipping what won't.
+
+        An object the API server stored under an older schema still comes back
+        on read - a CRD's validation runs on write, not on what is already
+        there - so one MetricMapping written before a field was required is
+        enough to raise here. Raising fails the whole pipeline step, which
+        takes down the serving stack: the fleet stops placing replicas because
+        a telemetry object is out of date.
+
+        So a parse failure drops that object and says so, the same reasoning
+        that keeps the collector out of the stack's readiness. The rest of the
+        fleet's telemetry carries on without it.
+        """
+        out: list[_T] = []
+        for obj in request.get_required_resources(self.req, key):
+            try:
+                out.append(model.model_validate(obj))
+            except pydantic.ValidationError as err:
+                name = (obj.get("metadata") or {}).get("name", "<unnamed>")
+                response.warning(
+                    self.rsp,
+                    f"Ignoring {kind} {name}: it does not match the current schema "
+                    f"({err.error_count()} problems), so nothing it asks for is collected.",
+                )
+        return out
 
     def merge_destinations(
         self, destinations: list[tdv1alpha1.TelemetryDestination]
