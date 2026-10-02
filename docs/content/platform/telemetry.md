@@ -2,42 +2,60 @@
 title: Monitor the Fleet
 weight: 37
 aliases:
-- /guides/collecting-engine-metrics/
+
 - /guides/telemetry/
 description: Collect normalized metrics across the fleet and send them anywhere that speaks OTLP.
 ---
 <!-- vale write-good.Passive = NO -->
 
-Modelplane runs an OpenTelemetry collector on every inference cluster. It collects from
-every component Modelplane installs, which is more than your engines. It renames each
-component's series to a single `modelplane_*` vocabulary and pushes to a collector on your
-control plane. That collector is your fleet's
-single egress point, and it sends to any backend that speaks OTLP.
+Modelplane runs an OpenTelemetry collector on every inference cluster. It
+collects from every component Modelplane installs. This includes the inference
+server engine, inference gateway and Envoy proxy, router, and the GPU exporter
+your cloud provides. It renames each component's series to a single
+`modelplane_*` vocabulary and pushes to a collector on your control plane. That
+collector is your fleet's single egress point and sends data to any
+collector exporter backend.
 
-Modelplane has no API for this: nothing to write, and nothing to keep in sync as your
-deployments change.
+Modelplane allows you to write one destination for your metrics. You don't need
+to manage per-deployment configurations or update your configuration when a
+deployment changes. The OpenTelemetry collector can find pods itself and leader/worker
+splits or a prefill/decode pairs get collected the same as a single pod.
 
-## What you get
+## Telemetry workflow
 
-Every series carries `cluster`, and `job` and `instance` naming the target it was scraped
-from. A series about a deployment also carries `deployment`, `replica`, `namespace`,
-`engine`, and `role`.
+Every series carries `cluster`, `job`, and `instance` labels of the target
+resource. A series about a deployment also carries `deployment`, `replica`,
+`namespace`, `engine`, and `role` labels.
 
-Each replica publishes its own series. Combine them in the query, the way the metric's
-`acrossReplicas` says: `sum by (deployment)` for anything counted, `avg by (deployment)`
-for a ratio, `max by (deployment)` for a saturation figure an alert fires on. The
-collector doesn't add them up for you, because a scrape of one replica is one batch, and
-adding readings taken at different moments is not the traffic that happened.
+Each replica publishes its own series, so combine them in your query. Use the
+aggregation that the metric's `acrossReplicas` field in its `MetricMapping` names:
 
-The replica is an index rather than a pod, so it is bounded by the replica count and
-survives a restart and a rolling update. Group by it, not by `instance`.
+ - `sum by (deployment)`, for anything counted, such as requests, tokens, or queue depth.
+ - `avg by (deployment)`, for a ratio.
+ - `max by (deployment)`, for a saturation figure an alert fires on.
 
-`instance` is the pod's address, and it is there because two pods writing one series is one
-series with one of them lost - a deployment running several pods per replica, or two
-gateway pods, have nothing else to tell them apart. It does turn over on a rolling update,
-so a query that groups by it grows a series every time you deploy. Aggregate it away.
+To combine:
 
-Some of what you can read:
+```promql
+sum by (deployment) (rate(modelplane_frontend_request_duration_seconds_count[5m]))
+```
+
+The replica is an index rather than a pod, so it's bounded by the replica count
+and survives a restart and a rolling update. Group by `replica`, not by `instance`.
+
+For example:
+```promql
+# One line per replica, stable across rolling updates
+max by (deployment, replica) (modelplane_kv_cache_utilization_ratio)
+```
+The `instance` label is the pod's address. Without the `instance` label two pods writing to the same
+series would collide and a deployment with several pods per
+replica or two gateway pods couldn't distinguish between the pods.
+
+The `instance` label changes on a rolling update so queries that group by this
+label gain a new series every time you deploy. Group by `replica` instead.
+
+Some examples of the available metrics:
 
 | Metric | Means |
 | --- | --- |
@@ -53,24 +71,25 @@ Some of what you can read:
 | `modelplane_energy_joules_total` | Energy drawn since the driver last reloaded |
 
 Latency appears twice on purpose. The `frontend_` series are what your caller experienced,
-measured at the gateway. The engine's own series are what the engine spent. When the
-frontend number is slow and the engine number isn't, the problem is routing, queueing, or
-the network rather than the model.
+measured at the gateway. The engine's own series are what the engine spent. For
+example, if the frontend metric is slow and the engine isn't, you can 
+troubleshoot routing, queueing, or networking issues instead of the model.
+
 
 Saturation gauges come as a pair. The average is what you plan capacity against; the `_max`
 is what you alert on, because three replicas at 0.3 and one at 0.99 average to something
 comfortable while the fourth evicts and recomputes. A high `_max` beside
 `modelplane_requests_preempted_total` climbing is one replica thrashing.
 
-<!-- vale Google.Acronyms = NO -->
-No series names a pod. Replicas are interchangeable, so they're summed before the metrics
-leave the cluster; a rolling update would otherwise leave a dead series behind for every pod
-it replaced.
-<!-- vale Google.Acronyms = YES -->
+For example:
 
-## Sending it somewhere
+```promql
+max by (deployment) (modelplane_kv_cache_utilization_ratio) > 0.95
+```
 
-Create a `TelemetryDestination` naming whatever you already run:
+## Send telemetry to a destination
+
+Create a `TelemetryDestination` for your OpenTelemetry-compatible endpoint:
 
 ```yaml
 apiVersion: modelplane.ai/v1alpha1
@@ -86,9 +105,17 @@ spec:
 
 `type` names a collector exporter, by the name OpenTelemetry gives it.
 
-Put the credential in a Secret, name it with the sink's `secretRef`, and say which key holds
-the token. Modelplane composes the authenticator and wires it up, and the token never
-appears in `kubectl get -o yaml`:
+To authenticate with a bearer token, store the token in a Secret in Modelplane's
+namespace:
+
+```shell
+kubectl create secret generic telemetry-credentials \
+  --namespace <modelplane-namespace> \
+  --from-literal=token=<your-token>
+```
+
+Reference the Secret from the sink with `secretRef`, and set `auth.bearerTokenKey` to
+the key that holds the token:
 
 ```yaml
 spec:
@@ -102,10 +129,11 @@ spec:
       bearerTokenKey: token
 ```
 
-It reads the token from a file rather than the environment, so rotating it doesn't need the
-collector restarted.
+Modelplane configures the collector to send the token with every export.
 
-If you run Prometheus, export to that instead and query the fleet there:
+The collector reads the token from a file rather than the environment.
+
+If you run Prometheus, export to your Prometheus endpoint instead and query the fleet there:
 
 ```yaml
 spec:
@@ -115,8 +143,8 @@ spec:
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
-Name more than one sink and every one gets the whole stream. Each carries its own
-credential, so a vendor and your own Prometheus don't have to share a Secret:
+If you create more than one sink, all get the entire stream. Each sink
+carries it's own credential so you don't have to share a Secret.
 
 ```yaml
 spec:
@@ -133,7 +161,7 @@ spec:
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
-That is two copies of the fleet's metrics, billed twice.
+That's two copies of the fleet's metrics, billed twice.
 
 Anything else the exporter takes goes under `config`, passed through as you wrote it:
 
@@ -148,15 +176,37 @@ Anything else the exporter takes goes under `config`, passed through as you wrot
       tls:
         ca_file: /etc/ssl/certs/internal.pem
 ```
+Modelplane doesn't define a schema for an exporter's settings so anything under
+the `config` is passed to the collector exactly as written. TLS, retries,
+querying, compression and headers all work and any new settings in the collector
+are respected and the sink keeps working. 
 
-Modelplane doesn't model what an exporter is, so its TLS, retry and queue settings all work,
-and a sink keeps working when the collector gains a setting Modelplane has never heard of.
-An authentication scheme Modelplane doesn't compose works the same way: define the extension
-under `spec.extensions` and name it from the sink's `config`, which is what the `auth` block
-above does for you.
+To use an authentication scheme Modelplane doesn't compose, define the extension
+yourself under `spec.extensions`. Then reference it by its key from the sink's
+`config.auth.authenticator`. The `auth` block does the same wiring for you when
+you use a bearer token.
 
-Until you create one, Modelplane composes no collectors: nothing here stores anything, so
-collecting with nowhere to send it would spend GPU-cluster memory on samples nobody reads.
+```yaml
+spec:
+  sinks:
+  - name: vendor
+    type: otlphttp
+    endpoint: https://otel.vendor.example
+    secretRef:
+      name: vendor-oauth
+    config:
+      auth:
+        authenticator: oauth2client/vendor
+  extensions:
+    oauth2client/vendor:
+      client_id: modelplane
+      client_secret: ${env:CLIENT_SECRET}
+      token_url: https://issuer.example/oauth2/token
+```
+
+Modelplane doesn't run any collectors until you create a
+`TelemetryDestination`.
+
 Creating a destination turns collection on everywhere at once, and there's no per-deployment
 opt-out.
 
@@ -181,7 +231,39 @@ export to Prometheus and write recording rules there.
 ## Engines
 
 Modelplane renames vLLM's and SGLang's own metrics for you, so neither needs a mapping.
-SGLang needs one flag to publish them at all, below.
+SGLang requires the `--enable-metrics` to publish them at all.
+
+
+For example:
+
+```yaml
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: my-sglang-model
+  namespace: ml-team
+spec:
+  template:
+    spec:
+      engines:
+      - name: engine
+        members:
+        - role: Standalone
+          template:
+            spec:
+              containers:
+              - name: engine
+                image: lmsysorg/sglang:v0.5.10.post1-runtime
+                command:
+                - /bin/sh
+                - -c
+                - >-
+                  exec python3 -m sglang.launch_server
+                  --model-path <model>
+                  --host 0.0.0.0
+                  --port 8000
+                  --enable-metrics
+```
 
 Any other OpenAI-compatible engine reports its top-line numbers with no configuration. The
 gateway measures those, not the engine, so `modelplane_frontend_*` works for an engine
@@ -207,7 +289,7 @@ Modelplane renders every mapping into every cluster's collector, so you write on
 `from` is the name your engine emits and `to` is what Modelplane calls it.
 
 Say `fromUnit` whenever the engine measures in something other than the unit the name
-claims, and Modelplane converts to the base one. Skipping it is the expensive mistake here:
+claims, and Modelplane converts to the base one. Skipping this is the expensive mistake here:
 a series named `_seconds` that holds milliseconds reads a thousand times fast, and nothing
 downstream can tell.
 
@@ -215,8 +297,58 @@ Rename only where the measurements agree. Two engines' histograms under one name
 less than nothing if their buckets disagree, because a quantile over them is wrong rather
 than approximate.
 
-SGLang publishes `/metrics` only when it runs with `--enable-metrics`, so add that to its
-engine args. vLLM needs nothing.
+### Examples
+
+```yaml
+apiVersion: modelplane.ai/v1alpha1
+kind: MetricMapping
+metadata:
+  name: my-engine
+spec:
+  metrics:
+  # A plain rename.
+  - from: my_engine_queued_requests
+    to: modelplane_requests_waiting
+    acrossReplicas: Sum
+
+  # A unit conversion. The engine reports milliseconds; the name says seconds.
+  - from: my_engine_kv_transfer_ms
+    to: modelplane_request_kv_transfer_seconds
+    fromUnit: Milliseconds
+    acrossReplicas: Sum
+
+  # A request count taken out of a duration histogram. The histogram
+  # keeps its own name; this adds a counter beside it.
+  - from: my_engine_request_duration_seconds
+    part: Count
+    to: modelplane_requests_total
+    acrossReplicas: Sum
+
+  # Two counters folded into one name, told apart by a fixed label.
+  - from: my_engine_prompt_tokens_total
+    to: modelplane_tokens_total
+    acrossReplicas: Sum
+    labels:
+    - name: direction
+      value: input
+  - from: my_engine_generated_tokens_total
+    to: modelplane_tokens_total
+    acrossReplicas: Sum
+    labels:
+    - name: direction
+      value: output
+
+  # A label the engine already emits, renamed and its values translated.
+  - from: my_engine_finished_requests_total
+    to: modelplane_responses_total
+    acrossReplicas: Sum
+    labels:
+    - name: reason
+      from: finish_reason
+      values:
+        eos: stop
+        max_tokens: length
+```
 
 ## Why engine latency and gateway latency differ
 
@@ -228,83 +360,3 @@ one engine against itself, and the `frontend_` series for anything fleet-wide.
 Some measurements don't translate at all. SGLang's inter-token latency isn't vLLM's time per
 output token, so neither is renamed onto a shared name. The gateway measures time per output
 token for both.
-
-## Migrating from a hand-written `PodMonitor`
-
-Modelplane used to have you write a `PodMonitor` and reach an in-cluster Prometheus over a
-`port-forward`. Both are gone. Three steps to move across, and two of them fail quietly if
-you skip them.
-
-**Keep your Prometheus, and point a destination at it.** Collection becomes a push, so your
-store stops scraping and starts receiving. Same Prometheus, same retention, same Grafana:
-
-```yaml
-spec:
-  sinks:
-  - name: prometheus
-    type: prometheusremotewrite
-    config:
-      endpoint: http://prometheus.monitoring.svc:9090/api/v1/write
-```
-
-**Delete the monitors you wrote.** A `PodMonitor` or `ScrapeConfig` pointed at your engines
-keeps working against your own Prometheus, so nothing appears to break and you collect
-everything twice, under `vllm:*` and under `modelplane_*`, paying for both. One written
-against Modelplane's Prometheus stops being read by anything, because the operator goes with
-the stack.
-
-**Rewrite your dashboard queries.** Names change, and so do the labels: group by
-`deployment` rather than `model_name`, and every series carries `cluster`, `replica`, and
-the `instance` it was scraped from. A panel that showed one engine now shows one pod, so
-wrap it in `sum by (deployment)` or the aggregation that metric's `acrossReplicas` names.
-
-| Was | Is |
-| --- | --- |
-| `vllm:time_to_first_token_seconds` | `modelplane_request_ttft_seconds` |
-| `vllm:e2e_request_latency_seconds` | `modelplane_request_duration_seconds` |
-| `vllm:request_queue_time_seconds` | `modelplane_request_queue_seconds` |
-| `vllm:request_prefill_time_seconds` | `modelplane_request_prefill_seconds` |
-| `vllm:request_decode_time_seconds` | `modelplane_request_decode_seconds` |
-| `vllm:num_requests_running` | `modelplane_requests_running` |
-| `vllm:num_requests_waiting` | `modelplane_requests_waiting` |
-| `vllm:kv_cache_usage_perc` | `modelplane_kv_cache_utilization_ratio` |
-| `vllm:num_preemptions_total` | `modelplane_requests_preempted_total` |
-| `vllm:prefix_cache_hits_total` | `modelplane_prefix_cache_hits_total` |
-| `DCGM_FI_DEV_FB_USED` | `modelplane_gpu_memory_used_bytes` |
-| `DCGM_FI_DEV_GPU_TEMP` | `modelplane_gpu_temperature_celsius` |
-| `DCGM_FI_DEV_POWER_USAGE` | `modelplane_gpu_power_watts` |
-| `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | `modelplane_gpu_tensor_active_ratio` |
-| `envoy_cluster_upstream_rq_time` | `modelplane_frontend_request_duration_seconds` |
-
-Some have no replacement. A rename carries one metric to one name, so the counters that
-would fold several series under one label - tokens by direction, responses by reason,
-requests by status - aren't part of this surface yet. Keep reading those from your engine
-and your gateway directly. For prompt and output size, `modelplane_request_input_tokens`
-and `modelplane_request_output_tokens` carry the same measurement as histograms.
-
-`vllm:inter_token_latency_seconds` isn't renamed, because
-SGLang publishes a metric of the same name measuring something else; use
-`modelplane_frontend_tpot_seconds`, which the gateway measures the same way for every
-engine. `DCGM_FI_DEV_GPU_UTIL` isn't renamed either, because it only tells you the card
-wasn't idle; use `modelplane_gpu_compute_active_ratio` and
-`modelplane_gpu_tensor_active_ratio`.
-
-You can also defer the rewrite. A recording rule rebuilds an old name from a new one, so a
-dashboard keeps working untouched while you migrate it:
-
-```yaml
-- record: vllm:time_to_first_token_seconds_bucket
-  expr: label_replace(modelplane_request_ttft_seconds_bucket,
-          "model_name", "$1", "deployment", "(.*)")
-```
-
-Load that into the Prometheus you already run and nothing on the dashboard changes. It's one
-rule evaluation per metric over series your backend already holds, so it costs far less than
-collecting everything twice. Write one per name in the table above, and delete them once the
-panels use the new names.
-
-A series no statement renames doesn't leave the cluster. If a panel needs an engine's
-own name, write a `MetricMapping` that renames it onto the `modelplane_*` surface: a
-mapping for an engine Modelplane already knows adds to the built-in renames rather
-than replacing them.
-<!-- vale write-good.Passive = YES -->
