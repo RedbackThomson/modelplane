@@ -26,9 +26,8 @@ Every series carries `cluster`, `job`, and `instance` labels of the target
 resource. A series about a deployment also carries `deployment`, `replica`,
 `namespace`, `engine`, and `role` labels.
 
-Each replica publishes its own series, so combine them in your query. Every metric
-records which combination is the right one for it, as `acrossReplicas` in its
-`MetricMapping`, so you don't have to work it out per metric:
+Each replica publishes its own series, so combine them in your query. Which
+combination is right follows from what the metric measures:
 
  - `sum by (deployment)`, for anything counted, such as requests, tokens, or queue depth.
  - `avg by (deployment)`, for a ratio.
@@ -287,19 +286,18 @@ spec:
   metrics:
   - from: my_engine_queued_requests
     to: modelplane_requests_waiting
-    acrossReplicas: Sum
   - from: my_engine_kv_transfer_ms
     fromUnit: Milliseconds
     to: modelplane_request_kv_transfer_seconds
-    acrossReplicas: Mean
 ```
 
 Modelplane renders every mapping into every cluster's collector, so you write one once.
 `from` is the name your engine emits and `to` is what Modelplane calls it.
 
-`acrossReplicas` says how a query should combine the metric over a deployment's replicas,
-since every pod publishes its own series. Use `Sum` for anything counted and `Mean` for a
-ratio, where adding two replicas at half capacity would read as one at full.
+Modelplane leaves the combining to your backend. A scrape of one replica is one batch, so
+a collector that added them up would be summing readings taken at different moments, and
+two readings of one cumulative counter come to twice the traffic that happened. Your
+backend holds every replica's series and combines them at query time.
 
 Say `fromUnit` whenever the engine measures in something other than the unit the name
 claims, and Modelplane converts to the base one. Skipping this is the expensive mistake here:
@@ -322,31 +320,26 @@ spec:
   # A plain rename.
   - from: my_engine_queued_requests
     to: modelplane_requests_waiting
-    acrossReplicas: Sum
 
   # A unit conversion. The engine reports milliseconds; the name says seconds.
   - from: my_engine_kv_transfer_ms
     to: modelplane_request_kv_transfer_seconds
     fromUnit: Milliseconds
-    acrossReplicas: Sum
 
   # A request count taken out of a duration histogram. The histogram
   # keeps its own name; this adds a counter beside it.
   - from: my_engine_request_duration_seconds
     part: Count
     to: modelplane_requests_total
-    acrossReplicas: Sum
 
   # Two counters folded into one name, told apart by a fixed label.
   - from: my_engine_prompt_tokens_total
     to: modelplane_tokens_total
-    acrossReplicas: Sum
     labels:
     - name: direction
       value: input
   - from: my_engine_generated_tokens_total
     to: modelplane_tokens_total
-    acrossReplicas: Sum
     labels:
     - name: direction
       value: output
@@ -354,7 +347,6 @@ spec:
   # A label the engine already emits, renamed and its values translated.
   - from: my_engine_finished_requests_total
     to: modelplane_responses_total
-    acrossReplicas: Sum
     labels:
     - name: reason
       from: finish_reason

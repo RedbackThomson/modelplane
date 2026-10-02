@@ -83,8 +83,7 @@ _IDENTITY = (
     # number that looks right.
     #
     # It is the pod's address, so it does churn on a rolling update, which is
-    # the cost. Aggregate it away in the query: the identity above is what to
-    # group by, and `acrossReplicas` names how.
+    # the cost. Aggregate it away in the query, grouping by the identity above.
     "service.name",
     "service.instance.id",
 )

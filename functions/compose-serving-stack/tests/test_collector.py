@@ -139,7 +139,6 @@ class TestConfig(unittest.TestCase):
                         {
                             "from": "my_engine_duration_ms",
                             "to": "modelplane_requests_total",
-                            "acrossReplicas": "Sum",
                             "part": "Count",
                             "fromUnit": "Milliseconds",
                             "labels": [{"name": "status", "value": "ok"}],
@@ -298,7 +297,6 @@ class TestConfig(unittest.TestCase):
                         {
                             "from": "my_engine_cache_percent",
                             "to": "modelplane_kv_cache_utilization_ratio",
-                            "acrossReplicas": "Mean",
                             "fromUnit": "Percent",
                         }
                     ]
@@ -311,14 +309,10 @@ class TestConfig(unittest.TestCase):
     def test_a_metric_name_cannot_end_the_comparison_early(self) -> None:
         """A quote in `from` would rename whatever the rest of the line matched."""
         with self.assertRaises(ValidationError):
-            mmv1alpha1.Metric.model_validate(
-                {"from": 'x" or true or name == "y', "to": "modelplane_x", "acrossReplicas": "Sum"}
-            )
+            mmv1alpha1.Metric.model_validate({"from": 'x" or true or name == "y', "to": "modelplane_x"})
         for mapping in stacks.BUILTIN_MAPPINGS:
             for m in mapping.spec.metrics:
-                round_tripped = mmv1alpha1.Metric.model_validate(
-                    {"from": m.from_, "to": m.to, "acrossReplicas": m.acrossReplicas}
-                )
+                round_tripped = mmv1alpha1.Metric.model_validate({"from": m.from_, "to": m.to})
                 self.assertEqual(round_tripped.from_, m.from_)
 
     def test_a_label_value_cannot_end_the_string_it_sits_in(self) -> None:
@@ -336,7 +330,6 @@ class TestConfig(unittest.TestCase):
                         {
                             "from": "my_engine_finish",
                             "to": "modelplane_requests_total",
-                            "acrossReplicas": "Sum",
                             "labels": [{"name": "reason", "from": "finish", "values": {'ab"c': 'x"y'}}],
                         }
                     ]
@@ -362,7 +355,6 @@ class TestConfig(unittest.TestCase):
                         {
                             "from": "my_engine_finish",
                             "to": "modelplane_requests_total",
-                            "acrossReplicas": "Sum",
                             "labels": [{"name": "reason", "from": "reason", "values": {"eos": "stop"}}],
                         }
                     ]

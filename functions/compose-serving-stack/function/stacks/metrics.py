@@ -98,25 +98,6 @@ _GPU_UNITS = {
 }
 
 
-# What describes a piece of hardware or a replica rather than a fleet. A ratio
-# summed reads two replicas at half their KV cache as one at capacity, and a
-# temperature summed is not a temperature at all.
-#
-# Everything else here is counted - requests, tokens, joules, watts drawn,
-# queue depth - and a histogram can only be summed, which merges its buckets.
-_MEAN = {
-    "modelplane_kv_cache_utilization_ratio",
-    "modelplane_gpu_compute_active_ratio",
-    "modelplane_gpu_tensor_active_ratio",
-    "modelplane_gpu_memory_bandwidth_ratio",
-    "modelplane_gpu_temperature_celsius",
-}
-
-
-def _across_replicas(target: str) -> str:
-    return "Mean" if target in _MEAN else "Sum"
-
-
 def _mapping(
     name: str,
     pairs: dict[str, str],
@@ -128,8 +109,7 @@ def _mapping(
         spec=v1alpha1.Spec(
             metrics=[
                 v1alpha1.Metric.model_validate(
-                    {"from": src, "to": dst, "acrossReplicas": _across_replicas(dst)}
-                    | ({"fromUnit": units[src]} if src in units else {})
+                    {"from": src, "to": dst} | ({"fromUnit": units[src]} if src in units else {})
                 )
                 for src, dst in pairs.items()
             ]

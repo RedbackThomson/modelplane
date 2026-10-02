@@ -1664,11 +1664,13 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
     async def test_a_stale_mapping_does_not_break_the_stack(self) -> None:
         """A CRD validates on write, not on what it already stored.
 
-        A MetricMapping written before acrossReplicas was required still
-        comes back on read without it. Parsing it raises, and raising fails
-        the whole pipeline step - so the serving stack composes nothing and
-        the fleet stops placing replicas, because one telemetry object is out
-        of date. Seen on a real cluster.
+        A MetricMapping written against an older schema comes back on read
+        exactly as it was stored, so a value the enum no longer carries
+        reaches the parser. Parsing it raises, and raising fails the whole
+        pipeline step - so the serving stack composes nothing and the fleet
+        stops placing replicas, because one telemetry object is out of date.
+        Seen on a real cluster, where a mapping predating a required field
+        did it.
         """
         req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
         req.required_resources["mappings"].items.append(
@@ -1678,8 +1680,16 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
                         "apiVersion": "modelplane.ai/v1alpha1",
                         "kind": "MetricMapping",
                         "metadata": {"name": "stale"},
-                        # No acrossReplicas: the schema requires it now.
-                        "spec": {"metrics": [{"from": "old_engine_waiting", "to": "modelplane_requests_waiting"}]},
+                        # A unit the enum no longer carries.
+                        "spec": {
+                            "metrics": [
+                                {
+                                    "from": "old_engine_transfer",
+                                    "to": "modelplane_request_kv_transfer_seconds",
+                                    "fromUnit": "Centiseconds",
+                                }
+                            ]
+                        },
                     }
                 )
             )

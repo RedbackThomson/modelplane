@@ -65,13 +65,6 @@ class Label(BaseModel):
 
 
 class Metric(BaseModel):
-    acrossReplicas: Literal['Sum', 'Mean', 'Max']
-    """
-    How this metric combines over a deployment's replicas.
-    Every pod publishes its own series, told apart by the replica it belongs to and the instance it was scraped from, and a query over a deployment combines them. This says which combination is the right one: Sum for anything counted - requests, tokens, joules, a queue's depth. Mean for a ratio, where summing reads two replicas at half capacity as one at full. Max for a saturation figure an alert fires on, where a mean hides the replica in trouble.
-    Modelplane does not combine them in the collector. A scrape of one replica is one batch, so a collector that added them up would be adding readings taken at different moments, and two readings of one cumulative counter sum to twice the traffic that happened. The backend holds every replica's series and combines them at query time, where the arithmetic is right.
-    Required, with no default, because the wrong combination is silent: a deployment reports a number that looks entirely plausible.
-    """
     from_: constr(pattern=r'^[a-zA-Z_:][a-zA-Z0-9_:]*$', max_length=255) = Field(
         ..., alias='from'
     )
