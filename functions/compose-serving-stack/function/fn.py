@@ -817,6 +817,35 @@ class Composer:
                 f"{_name(dest.metadata)}. Telemetry has one destination per fleet.",
             )
 
+        # The collector mounts each sink's credential as a Secret in its own
+        # namespace on this cluster, and the operator wrote one Secret, on the
+        # control plane. Resolve it here so it can be composed out there:
+        # without this the Deployment mounts a Secret nobody creates and the
+        # pod never starts, which is the one failure mode a destination with a
+        # credential would always hit.
+        secrets: dict[str, tuple[str, dict]] = {}
+        for sink in dest.spec.sinks:
+            if sink.secretRef is None:
+                continue
+            key = f"collector-secret-{sink.name}"
+            response.require_resources(
+                self.rsp,
+                name=key,
+                api_version="v1",
+                kind="Secret",
+                match_name=sink.secretRef.name,
+                namespace=_CLUSTER_RESOURCE_NAMESPACE,
+            )
+            if key not in self.req.required_resources:
+                return
+            found = request.get_required_resource(self.req, key)
+            # Resolved and absent is not a reason to withhold the collector.
+            # The TelemetryDestination reports a Secret that isn't there, and
+            # the pod waits for it the way any pod waits for a Secret, which is
+            # recoverable the moment the operator creates it.
+            if found and found.get("data"):
+                secrets[key] = (sink.secretRef.name, found["data"])
+
         # Modelplane's own mappings first, then the operator's, which add to
         # them rather than replacing them.
         mappings = list(stacks.BUILTIN_MAPPINGS)
@@ -841,6 +870,28 @@ class Composer:
                     manifest,
                     metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
                     ready_when=cel,
+                ),
+            )
+            self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+
+        for key, (secret_name, data) in secrets.items():
+            if not (pc_observed or key in self.req.observed.resources):
+                continue
+            # Same name, same namespace, other cluster, so the Deployment's
+            # mount needs nothing rewritten. The base64 `data` is copied
+            # verbatim: decoding and re-encoding would corrupt a credential
+            # that isn't text.
+            resource.update(
+                self.rsp.desired.resources[key],
+                _k8s_object(
+                    pc,
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": secret_name, "namespace": collector.NAMESPACE},
+                        "data": data,
+                    },
+                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
                 ),
             )
             self.rsp.desired.resources[key].ready = fnv1.READY_TRUE

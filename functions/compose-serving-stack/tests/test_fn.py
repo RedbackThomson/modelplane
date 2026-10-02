@@ -1502,7 +1502,10 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
         cls.runner = fn.FunctionRunner()
 
     @staticmethod
-    def _with_destination(req: fnv1.RunFunctionRequest) -> fnv1.RunFunctionRequest:
+    def _with_destination(req: fnv1.RunFunctionRequest, *, secret: str | None = None) -> fnv1.RunFunctionRequest:
+        sink: dict = {"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}
+        if secret:
+            sink |= {"secretRef": {"name": secret}, "auth": {"bearerTokenKey": "token"}}
         req.required_resources["destinations"].items.append(
             fnv1.Resource(
                 resource=resource.dict_to_struct(
@@ -1510,14 +1513,25 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
                         "apiVersion": "modelplane.ai/v1alpha1",
                         "kind": "TelemetryDestination",
                         "metadata": {"name": "acme"},
-                        "spec": {
-                            "sinks": [{"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}]
-                        },
+                        "spec": {"sinks": [sink]},
                     }
                 )
             )
         )
         req.required_resources["mappings"].items.extend([])
+        if secret:
+            req.required_resources["collector-secret-primary"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "v1",
+                            "kind": "Secret",
+                            "metadata": {"name": secret, "namespace": "modelplane-system"},
+                            "data": {"token": "c2hoaGg="},
+                        }
+                    )
+                )
+            )
         return req
 
     async def test_the_collector_does_not_gate_the_stack(self) -> None:
@@ -1540,3 +1554,37 @@ class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
             with self.subTest(key=key):
                 self.assertNotIn(key, req.observed.resources)
                 self.assertEqual(got.desired.resources[key].ready, fnv1.READY_TRUE)
+
+    async def test_the_credential_reaches_the_cluster_that_mounts_it(self) -> None:
+        """The operator writes one Secret; the collector mounts it elsewhere.
+
+        A TelemetryDestination is cluster-scoped on the control plane and the
+        collector runs on every workload cluster in the fleet. Resolving the
+        Secret and stopping there leaves the Deployment mounting a name
+        nothing out there creates, so the pod never starts and the fleet
+        exports nothing - the failure every destination with a credential
+        would hit, which is every destination that reaches a real backend.
+        """
+        req = self._with_destination(
+            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
+        )
+        got = await self.runner.RunFunction(req, None)
+        self.assertIn("collector-secret-primary", got.desired.resources)
+        composed = resource.struct_to_dict(got.desired.resources["collector-secret-primary"].resource)
+        manifest = composed["spec"]["forProvider"]["manifest"]
+        self.assertEqual(manifest["kind"], "Secret")
+        self.assertEqual(manifest["metadata"]["name"], "telemetry-credentials")
+        self.assertEqual(manifest["metadata"]["namespace"], "modelplane-system")
+        # Copied verbatim: re-encoding would corrupt a credential that is not
+        # text, and the mount reads the same key the sink's auth names.
+        self.assertEqual(manifest["data"], {"token": "c2hoaGg="})
+
+    async def test_a_destination_asks_for_its_credential_in_one_namespace(self) -> None:
+        """Unqualified, the requirement matches a Secret of that name anywhere."""
+        req = self._with_destination(
+            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
+        )
+        got = await self.runner.RunFunction(req, None)
+        selector = got.requirements.resources["collector-secret-primary"]
+        self.assertEqual(selector.match_name, "telemetry-credentials")
+        self.assertEqual(selector.namespace, "modelplane-system")
