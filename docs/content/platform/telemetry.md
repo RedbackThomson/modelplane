@@ -102,8 +102,10 @@ spec:
       bearerTokenKey: token
 ```
 
-It reads the token from a file rather than the environment, so rotating it doesn't need the
-collector restarted.
+Create that Secret once, in `modelplane-system` on the control plane. Modelplane copies it
+to every cluster running a collector, so you don't put the credential on each GPU cluster
+yourself. It reads the token from a file rather than the environment, so rotating it
+doesn't need the collector restarted.
 
 If you run Prometheus, export to that instead and query the fleet there:
 
@@ -111,7 +113,7 @@ If you run Prometheus, export to that instead and query the fleet there:
 spec:
   sinks:
   - name: prometheus
-    type: prometheusremotewrite
+    type: prometheus_remote_write
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
@@ -129,11 +131,18 @@ spec:
     auth:
       bearerTokenKey: token
   - name: prometheus
-    type: prometheusremotewrite
+    type: prometheus_remote_write
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
-That is two copies of the fleet's metrics, billed twice.
+That is two copies of the fleet's metrics, so a vendor charging per sample charges for
+both.
+
+Sinks can also come from more than one `TelemetryDestination`. Modelplane concatenates
+them, so a team adding an export creates its own object rather than editing one somebody
+else owns. Sink names are what the collector calls its exporters, so they have to be
+unique across destinations; where two collide, the destination whose name sorts first
+keeps it and Modelplane says so on the `ServingStack`.
 
 Anything else the exporter takes goes under `config`, passed through as you wrote it:
 
@@ -171,7 +180,7 @@ produces no rates and no quantiles. Your backend does that. A fleet-wide p99:
 
 ```promql
 histogram_quantile(0.99, sum by (le) (
-  rate(modelplane_frontend_ttft_seconds_bucket{model="Qwen/Qwen3-8B"}[5m])))
+  rate(modelplane_frontend_ttft_seconds_bucket{deployment="qwen3-8b"}[5m])))
 ```
 
 Modelplane has no dashboards of its own. What it exports is counters and histogram buckets, and
@@ -198,13 +207,19 @@ spec:
   metrics:
   - from: my_engine_queued_requests
     to: modelplane_requests_waiting
+    acrossReplicas: Sum
   - from: my_engine_kv_transfer_ms
     fromUnit: Milliseconds
     to: modelplane_request_kv_transfer_seconds
+    acrossReplicas: Mean
 ```
 
 Modelplane renders every mapping into every cluster's collector, so you write one once.
 `from` is the name your engine emits and `to` is what Modelplane calls it.
+
+`acrossReplicas` says how a query should combine the metric over a deployment's replicas,
+since every pod publishes its own series. Use `Sum` for anything counted and `Mean` for a
+ratio, where adding two replicas at half capacity would read as one at full.
 
 Say `fromUnit` whenever the engine measures in something other than the unit the name
 claims, and Modelplane converts to the base one. Skipping it is the expensive mistake here:
@@ -242,7 +257,7 @@ store stops scraping and starts receiving. Same Prometheus, same retention, same
 spec:
   sinks:
   - name: prometheus
-    type: prometheusremotewrite
+    type: prometheus_remote_write
     config:
       endpoint: http://prometheus.monitoring.svc:9090/api/v1/write
 ```

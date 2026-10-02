@@ -27,14 +27,15 @@ spec:
             type: object
             required: [sinks]
             description: >-
-              Where the fleet's telemetry goes. Modelplane composes no
-              collectors until a TelemetryDestination exists: neither tier
-              stores anything, so collecting with nowhere to export would
-              spend GPU-cluster memory on samples nobody reads. Creating one
-              turns collection on everywhere at once.
+              Where the fleet's metrics go. Modelplane runs no collectors
+              until a TelemetryDestination exists, and creating one turns on
+              collection on every inference cluster.
 
-              There is no per-deployment opt-out. A ModelDeployment's author
-              owns neither the destination nor its bill.
+              Several can exist. Their sinks are concatenated into one
+              collector configuration, so adding a backend is a new object
+              rather than an edit to one somebody else owns. A sink's name is
+              the collector's name for its exporter, so it has to be unique
+              across destinations.
             properties:
               sinks:
                 type: array
@@ -68,7 +69,7 @@ spec:
                       description: >-
                         The collector exporter to send with, by the name
                         OpenTelemetry gives it: otlphttp, otlp,
-                        prometheusremotewrite, kafka, and every other one the
+                        prometheus_remote_write, kafka, and every other one the
                         collector provides.
 
                         Not an enum, because enumerating them here would mean
@@ -79,30 +80,24 @@ spec:
                       type: string
                       maxLength: 2048
                       description: >-
-                        Where this sink writes. Typed rather than left to the
-                        configuration below because it is the setting every
-                        destination has to get right, and the one worth
-                        catching here rather than in a collector that won't
-                        start.
+                        Where this sink writes. Leave it unset for an exporter
+                        that doesn't take an endpoint, such as kafka or debug,
+                        and configure it in `config` instead.
 
-                        Optional, because not every exporter addresses its
-                        destination this way: Kafka takes brokers, the file
-                        exporter a path, and the debug exporter nothing at
-                        all. Those go in the configuration below, under the
-                        names that exporter gives them.
+                        Set here, it wins: Modelplane applies it over
+                        `config`, so a sink cannot be quietly redirected by
+                        the configuration passed through beside it.
                     auth:
                       type: object
                       description: >-
-                        How to authenticate, for the schemes Modelplane
-                        composes. The collector takes no credential inline: it
-                        authenticates through an extension an exporter names,
-                        so setting this composes that extension and wires the
-                        reference.
+                        Authentication Modelplane sets up for this sink, using
+                        a credential from `secretRef`. For another scheme,
+                        define an authenticator under spec.extensions and
+                        reference it from `config`.
 
-                        A scheme that isn't here is still reachable. Define
-                        the extension yourself under spec.extensions and name
-                        it from this sink's config, which is what Modelplane
-                        does on your behalf.
+                        Set here, it wins: Modelplane applies it over an
+                        `auth` block in `config`, so a sink's credential
+                        cannot be quietly unpicked.
                       properties:
                         bearerTokenKey:
                           type: string
@@ -116,46 +111,47 @@ spec:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                       description: >-
-                        Anything else that exporter takes, passed through
-                        unread: TLS, retry, queueing, compression, headers.
+                        The rest of the exporter's configuration, passed
+                        through as written: TLS, retries, queueing,
+                        compression, headers.
 
-                        Modelplane does not model an exporter's configuration,
-                        because the schema is OpenTelemetry's and versioned
-                        separately. Typing it would mean a Modelplane release
-                        for each setting the collector gains, and would drop
-                        the ones this has never heard of. What is typed above
-                        is what belongs to Modelplane: which sinks exist, what
-                        each is called, where it writes, and which Secret it
-                        reads.
+                        Modelplane sets one default, for the exporters that
+                        flatten a series into labels: prometheus and
+                        prometheus_remote_write get
+                        resource_to_telemetry_conversion, or they would
+                        receive every series stripped of the cluster,
+                        deployment, engine and role it belongs to. Setting it
+                        here overrides that.
                     secretRef:
                       type: object
                       required: [name]
                       description: >-
-                        A Secret holding this sink's credential. Its keys
-                        reach the collector as files under
-                        /etc/modelplane/telemetry/<sink name>/, and as
-                        environment variables, for configuration above
-                        referring to ${env:TOKEN}.
-
-                        Per sink rather than per destination, so two sinks
-                        with different credentials don't have to share one
-                        Secret and tell their keys apart by prefix. The files
-                        are per sink; the environment variables are not, so
-                        two Secrets sharing a key name still collide there and
-                        the file is the one to read.
+                        A Secret holding this sink's credentials. Modelplane
+                        mounts each key as a file under
+                        /etc/modelplane/telemetry/<sink name>/ and sets it as
+                        an environment variable for ${env:KEY} references in
+                        `config`. All sinks share one environment, so where
+                        two Secrets have the same key, refer to the file.
                       properties:
                         name:
                           type: string
                           maxLength: 253
-                          description: Name of the Secret, in Modelplane's namespace.
+                          description: >-
+                            Name of the Secret, in modelplane-system on the
+                            control plane. Modelplane copies it to every
+                            cluster running a collector, so it doesn't have
+                            to exist on each of them already.
               extensions:
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
                 description: >-
-                  The collector's extensions block, passed through unread,
-                  for the authenticator a sink references. Bearer token,
-                  basic auth, OIDC and SigV4 all work, because none of them
-                  is modelled here.
+                  Collector extensions, passed through as written. Use it to
+                  define an authenticator that a sink's `config` references.
+
+                  An exporter needs a client authenticator - basicauth,
+                  oauth2client, sigv4auth, headers_setter. The oidc extension
+                  authenticates callers of a receiver, so it is not one of
+                  these.
           status:
             type: object
             properties:
