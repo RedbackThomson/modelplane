@@ -382,6 +382,27 @@ class TestConfig(unittest.TestCase):
                 self.assertNotIn("set(name,", st)
                 self.assertNotIn("set(value_double,", st)
 
+    def test_sglang_carries_no_queue_time_or_preemption(self) -> None:
+        """SGLang publishes neither, so there is nothing to rename onto them.
+
+        Checked against a running SGLang v0.4.9.post2: it has no per-request
+        queue-time metric and no retraction counters at all. The nearest
+        thing, sglang:avg_request_queue_latency, is a gauge of the mean over
+        the last batch - a different measurement from vLLM's per-request
+        histogram, and one name holding both makes a fleet quantile
+        meaningless.
+        """
+        sglang = {
+            m.from_: m.to
+            for mapping in stacks.BUILTIN_MAPPINGS
+            for m in mapping.spec.metrics
+            if m.from_.startswith("sglang:")
+        }
+        self.assertTrue(sglang, "the SGLang built-in went missing")
+        self.assertNotIn("modelplane_request_queue_seconds", sglang.values())
+        self.assertNotIn("modelplane_requests_preempted_total", sglang.values())
+        self.assertFalse([k for k in sglang if "retracted" in k or "queue_time" in k])
+
     def test_sglang_latency_histograms_are_not_renamed(self) -> None:
         """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""
         joined = " ".join(_metric_statements())

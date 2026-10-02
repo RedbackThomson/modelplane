@@ -231,7 +231,14 @@ less than nothing if their buckets disagree, because a quantile over them is wro
 than approximate.
 
 SGLang publishes `/metrics` only when it runs with `--enable-metrics`, so add that to its
-engine args. vLLM needs nothing.
+engine args. Add `--collect-tokens-histogram` too, or it publishes prompt and generation
+tokens as plain counters and `modelplane_request_input_tokens` and
+`modelplane_request_output_tokens` stay empty for that engine. vLLM needs nothing.
+
+SGLang publishes no queue time per request and no preemption counters, so
+`modelplane_request_queue_seconds` and `modelplane_requests_preempted_total` carry vLLM
+only. Its `sglang:avg_request_queue_latency` is a gauge of the mean over the last batch,
+which is a different measurement, so Modelplane doesn't fold it in.
 
 ## Why engine latency and gateway latency differ
 

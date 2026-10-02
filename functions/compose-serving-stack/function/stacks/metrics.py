@@ -57,13 +57,18 @@ _VLLM = {
     "vllm:prefix_cache_queries_total": "modelplane_prefix_cache_lookups_total",
 }
 
+# SGLang publishes none of the queue-latency or preemption measurements vLLM
+# does, so there is nothing here to rename onto those names.
+# sglang:avg_request_queue_latency is the nearest thing to a queue time and is
+# not the same measurement - a gauge holding the mean over the last batch,
+# where modelplane_request_queue_seconds is a per-request histogram - and one
+# name holding both would make a quantile over the fleet meaningless.
+# The two token histograms need --collect-tokens-histogram as well as
+# --enable-metrics; the engine publishes only the _total counters without it.
 _SGLANG = {
-    "sglang:queue_time_seconds": "modelplane_request_queue_seconds",
     "sglang:num_running_reqs": "modelplane_requests_running",
     "sglang:num_queue_reqs": "modelplane_requests_waiting",
     "sglang:token_usage": "modelplane_kv_cache_utilization_ratio",
-    "sglang:num_retracted_requests_total": "modelplane_requests_preempted_total",
-    "sglang:num_retracted_input_tokens_total": "modelplane_tokens_recomputed_total",
     "sglang:prompt_tokens_histogram": "modelplane_request_input_tokens",
     "sglang:generation_tokens_histogram": "modelplane_request_output_tokens",
 }
