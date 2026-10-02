@@ -2,9 +2,9 @@
 title: Monitor the Fleet
 weight: 37
 aliases:
-
+- /guides/collecting-engine-metrics/
 - /guides/telemetry/
-description: Collect normalized metrics across the fleet and send them anywhere that speaks OTLP.
+description: Collect normalized metrics across the fleet and send them to any backend the collector can export to.
 ---
 <!-- vale write-good.Passive = NO -->
 
@@ -12,14 +12,13 @@ Modelplane runs an OpenTelemetry collector on every inference cluster. It
 collects from every component Modelplane installs. This includes the inference
 server engine, inference gateway and Envoy proxy, router, and the GPU exporter
 your cloud provides. It renames each component's series to a single
-`modelplane_*` vocabulary and pushes to a collector on your control plane. That
-collector is your fleet's single egress point and sends data to any
-collector exporter backend.
+`modelplane_*` vocabulary and exports them to wherever you say - any backend the
+collector has an exporter for, not only OTLP.
 
 Modelplane allows you to write one destination for your metrics. You don't need
 to manage per-deployment configurations or update your configuration when a
-deployment changes. The OpenTelemetry collector can find pods itself and leader/worker
-splits or a prefill/decode pairs get collected the same as a single pod.
+deployment changes. The collector finds pods itself, so a leader/worker split or a
+prefill/decode pair is collected the same as a single pod.
 
 ## Telemetry workflow
 
@@ -41,9 +40,8 @@ sum by (deployment) (rate(modelplane_frontend_request_duration_seconds_count[5m]
 ```
 
 The replica is an index rather than a pod, so it's bounded by the replica count
-and survives a restart and a rolling update. Group by `replica`, not by `instance`.
+and survives a restart and a rolling update. Group by `replica`, not by `instance`:
 
-For example:
 ```promql
 # One line per replica, stable across rolling updates
 max by (deployment, replica) (modelplane_kv_cache_utilization_ratio)
@@ -76,12 +74,10 @@ example, if the frontend metric is slow and the engine isn't, you can
 troubleshoot routing, queueing, or networking issues instead of the model.
 
 
-Saturation gauges come as a pair. The average is what you plan capacity against; the `_max`
-is what you alert on, because three replicas at 0.3 and one at 0.99 average to something
-comfortable while the fourth evicts and recomputes. A high `_max` beside
-`modelplane_requests_preempted_total` climbing is one replica thrashing.
-
-For example:
+Saturation gauges are per replica, so how you combine them decides what you see. Average
+across a deployment to plan capacity, and take the maximum to alert: three replicas at 0.3
+and one at 0.99 average to something comfortable while the fourth evicts and recomputes. A
+high maximum beside `modelplane_requests_preempted_total` climbing is one replica thrashing. To alert on it:
 
 ```promql
 max by (deployment) (modelplane_kv_cache_utilization_ratio) > 0.95
@@ -105,12 +101,14 @@ spec:
 
 `type` names a collector exporter, by the name OpenTelemetry gives it.
 
-To authenticate with a bearer token, store the token in a Secret in Modelplane's
-namespace:
+To authenticate with a bearer token, store the token in a Secret in
+`modelplane-system` on your control plane. Create it once: Modelplane copies it to
+every cluster running a collector, so you don't put the credential on each GPU
+cluster yourself.
 
 ```shell
 kubectl create secret generic telemetry-credentials \
-  --namespace <modelplane-namespace> \
+  --namespace modelplane-system \
   --from-literal=token=<your-token>
 ```
 
@@ -129,9 +127,8 @@ spec:
       bearerTokenKey: token
 ```
 
-Modelplane configures the collector to send the token with every export.
-
-The collector reads the token from a file rather than the environment.
+Modelplane configures the collector to send the token with every export. It reads the
+token from a file rather than the environment, so rotating it needs no restart.
 
 If you run Prometheus, export to your Prometheus endpoint instead and query the fleet there:
 
@@ -143,8 +140,8 @@ spec:
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
-If you create more than one sink, all get the entire stream. Each sink
-carries it's own credential so you don't have to share a Secret.
+If you create more than one sink, all get the entire stream. Each sink carries its
+own credential, so a vendor and your own Prometheus don't have to share a Secret.
 
 ```yaml
 spec:
@@ -185,7 +182,7 @@ Anything else the exporter takes goes under `config`, passed through as you wrot
 ```
 Modelplane doesn't define a schema for an exporter's settings so anything under
 the `config` is passed to the collector exactly as written. TLS, retries,
-querying, compression and headers all work and any new settings in the collector
+queueing, compression and headers all work and any new settings in the collector
 are respected and the sink keeps working. 
 
 To use an authentication scheme Modelplane doesn't compose, define the extension
@@ -238,10 +235,11 @@ export to Prometheus and write recording rules there.
 ## Engines
 
 Modelplane renames vLLM's and SGLang's own metrics for you, so neither needs a mapping.
-SGLang requires the `--enable-metrics` to publish them at all.
-
-
-For example:
+SGLang needs two flags: `--enable-metrics` to publish `/metrics` at all, and
+`--collect-tokens-histogram` for the prompt and generation histograms behind
+`modelplane_request_input_tokens` and `modelplane_request_output_tokens`. Without the
+second it publishes those as plain counters and both series stay empty. vLLM needs
+nothing.
 
 ```yaml
 apiVersion: modelplane.ai/v1alpha1
@@ -270,7 +268,12 @@ spec:
                   --host 0.0.0.0
                   --port 8000
                   --enable-metrics
+                  --collect-tokens-histogram
 ```
+
+SGLang publishes no queue time per request and no preemption counters, so
+`modelplane_request_queue_seconds` and `modelplane_requests_preempted_total` carry vLLM
+only.
 
 Any other OpenAI-compatible engine reports its top-line numbers with no configuration. The
 gateway measures those, not the engine, so `modelplane_frontend_*` works for an engine
