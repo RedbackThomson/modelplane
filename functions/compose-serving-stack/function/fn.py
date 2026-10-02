@@ -338,7 +338,7 @@ class Composer:
         rendered = self.compose_components(components)
         rendered += self.compose_gateway()
         rendered += self.compose_gateway_pki()
-        rendered += self.compose_collector()
+        self.compose_collector()
         self.compose_component_usages(components)
         self.compose_gateway_usages()
         self.write_status()
@@ -763,7 +763,7 @@ class Composer:
         rendered.append("gateway-client-auth")
         return rendered
 
-    def compose_collector(self) -> list[str]:
+    def compose_collector(self) -> None:
         """Compose the collector that gathers this cluster's telemetry.
 
         Nothing until a TelemetryDestination exists. Neither collector stores
@@ -771,7 +771,14 @@ class Composer:
         CPU spent on samples nobody will ever read; a fleet that has not said
         where its telemetry goes gets none composed.
 
-        Returns the composed-resource keys it rendered, for readiness.
+        Ready on arrival, unlike everything else the stack composes. The
+        collector observes the fleet; nothing serving depends on it. Gating the
+        stack on it would put the fleet's ability to place a replica behind its
+        ability to export a metric, so one TelemetryDestination naming an
+        endpoint that has gone away would leave every InferenceCluster in the
+        fleet not Ready and stop the scheduler placing anything, anywhere. A
+        collector that cannot start reports it on its own objects and on the
+        TelemetryDestination, which is where that failure belongs.
         """
         response.require_resources(
             self.rsp,
@@ -786,7 +793,7 @@ class Composer:
             kind="MetricMapping",
         )
         if "destinations" not in self.req.required_resources or "mappings" not in self.req.required_resources:
-            return []
+            return
 
         # Sorted, not whichever the API server listed first: the collector
         # restarts on a change to its rendered config, so an unstable choice
@@ -799,7 +806,7 @@ class Composer:
             key=lambda d: _name(d.metadata),
         )
         if not destinations:
-            return []
+            return
         dest = destinations[0]
         if len(destinations) > 1:
             # Which one wins would otherwise be whichever the API server listed
@@ -819,7 +826,6 @@ class Composer:
 
         pc_observed = self.provider_configs_observed()
         pc = _pc_name(self.xr)
-        rendered: list[str] = []
         for key, manifest, cel in collector.objects(
             cluster=_cluster_name(self.xr),
             mappings=mappings,
@@ -837,8 +843,7 @@ class Composer:
                     ready_when=cel,
                 ),
             )
-            rendered.append(key)
-        return rendered
+            self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
 
     def compose_gateway_usages(self) -> None:
         """Compose Usages ordering the hand-rendered gateway teardown.

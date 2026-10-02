@@ -1490,3 +1490,53 @@ class TestKeyInventory(unittest.IsolatedAsyncioTestCase):
                         )
                     got = await self.runner.RunFunction(_request(cloud, stack, observed=observed), None)
                     self.assertEqual(expected, set(got.desired.resources.keys()))
+
+
+class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
+    """The collector is composed, but the stack never waits on it."""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = fn.FunctionRunner()
+
+    @staticmethod
+    def _with_destination(req: fnv1.RunFunctionRequest) -> fnv1.RunFunctionRequest:
+        req.required_resources["destinations"].items.append(
+            fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    {
+                        "apiVersion": "modelplane.ai/v1alpha1",
+                        "kind": "TelemetryDestination",
+                        "metadata": {"name": "acme"},
+                        "spec": {
+                            "sinks": [{"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}]
+                        },
+                    }
+                )
+            )
+        )
+        req.required_resources["mappings"].items.extend([])
+        return req
+
+    async def test_the_collector_does_not_gate_the_stack(self) -> None:
+        """A collector nothing has observed yet is still Ready.
+
+        Everything else the stack composes is Ready only once its observed
+        Ready condition says so, because the fleet cannot serve without it.
+        The collector only watches, so gating on it would put placing a
+        replica behind exporting a metric: one destination pointing at an
+        endpoint that has gone away would take every InferenceCluster in the
+        fleet out of Ready and stop the scheduler.
+        """
+        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+        got = await self.runner.RunFunction(req, None)
+        collector_keys = [k for k in got.desired.resources if k == "collector" or k.startswith("collector-")]
+        # The Deployment, which is the one with a readiness CEL of its own and
+        # so the one that would have gated the stack.
+        self.assertIn("collector", collector_keys)
+        for key in collector_keys:
+            with self.subTest(key=key):
+                self.assertNotIn(key, req.observed.resources)
+                self.assertEqual(got.desired.resources[key].ready, fnv1.READY_TRUE)
