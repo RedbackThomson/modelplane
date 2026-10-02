@@ -149,6 +149,8 @@ Baseten
 WekaIO
 NetApp
 minikube
+Monitor
+Aggregate
 
 # AI assistants and agent tooling
 MCP
