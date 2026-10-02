@@ -31,6 +31,8 @@ concepts:
   InferenceGateway: /platform/inference-gateway
   InferenceClass: /platform/inference-class
   InferenceCluster: /platform/inference-cluster
+  MetricMapping: /platform/telemetry
+  TelemetryDestination: /platform/telemetry
   ModelDeployment: /models/model-deployment
   ModelService: /models/model-service
   ModelCache: /models/model-cache

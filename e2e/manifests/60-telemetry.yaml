@@ -1,0 +1,16 @@
+# Telemetry for the fleet. Applied with everything else so the collector
+# composes while the model rolls out, which costs --verify no extra wait.
+#
+# The debug exporter prints what reached it to the collector's own log, so the
+# whole path - discovery, scrape, rename, unit conversion, identity - is
+# assertable with kubectl logs and needs no metrics backend to run.
+apiVersion: modelplane.ai/v1alpha1
+kind: TelemetryDestination
+metadata:
+  name: default
+spec:
+  sinks:
+  - name: debug
+    type: debug
+    config:
+      verbosity: detailed

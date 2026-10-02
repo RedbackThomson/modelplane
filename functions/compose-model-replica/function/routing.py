@@ -66,6 +66,12 @@ _SIDECAR_IMAGE = "ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0"
 # config, so the mount path never needs to encode which one.
 _EPP_CONFIG_FILE = "epp-config.yaml"
 
+# The picker's Prometheus endpoint, and what a series off it is attributed to.
+# 9090 is the picker's own default; it is named here because the port has to be
+# declared on the pod for the collector to discover it either way.
+_EPP_METRICS_PORT = 9090
+_EPP_ROLE = "picker"
+
 # The pd-sidecar takes ENGINE_PORT (8000), so the decode engine listens here.
 _DECODE_ENGINE_PORT = 8001
 
@@ -279,7 +285,7 @@ def _unified(
     ns = base.remote_namespace(replica)
     out["inference-pool"] = base.wrap_object(provider_config, _inference_pool(name, ns, selector))
     out[base.ROUTE_KEY] = base.wrap_object(provider_config, _http_route(replica, name))
-    out.update(_epp_objects(name, ns, provider_config, _unified_epp_config_yaml(block_size)))
+    out.update(_epp_objects(name, ns, provider_config, _unified_epp_config_yaml(block_size), replica))
     return out
 
 
@@ -328,7 +334,7 @@ def _disaggregated(
     ns = base.remote_namespace(replica)
     out["inference-pool"] = base.wrap_object(provider_config, _inference_pool(name, ns, selector))
     out[base.ROUTE_KEY] = base.wrap_object(provider_config, _http_route(replica, name))
-    out.update(_epp_objects(name, ns, provider_config, _disaggregated_epp_config_yaml(block_size)))
+    out.update(_epp_objects(name, ns, provider_config, _disaggregated_epp_config_yaml(block_size), replica))
     return out
 
 
@@ -392,7 +398,12 @@ def _add_sidecar_to_decode(obj: k8sobjv1alpha1.Object) -> None:
         containers = tmpl["spec"]["containers"]
         engine = next(c for c in containers if c["name"] == "engine")
         port = _decode_port(engine)
-        engine["ports"] = [{"containerPort": port}]
+        # Named, because the collector's engine scrape job selects on the port
+        # name: dropping it here would leave a disaggregated decode pod with no
+        # named port at all, and nothing would scrape the engine behind the
+        # sidecar. The sidecar's own port stays unnamed for the same reason -
+        # it serves inference, not /metrics.
+        engine["ports"] = [{"name": base.ENGINE_PORT_NAME, "containerPort": port}]
         engine["readinessProbe"] = {
             "httpGet": {"path": "/health", "port": port},
             "initialDelaySeconds": 30,
@@ -490,7 +501,13 @@ def _http_route(replica: v1alpha1.ModelReplica, name: str) -> dict:
     }
 
 
-def _epp_objects(name: str, ns: str, provider_config: str, config_yaml: str) -> dict[str, k8sobjv1alpha1.Object]:
+def _epp_objects(
+    name: str,
+    ns: str,
+    provider_config: str,
+    config_yaml: str,
+    replica: v1alpha1.ModelReplica,
+) -> dict[str, k8sobjv1alpha1.Object]:
     """The endpoint picker: ServiceAccount, RBAC, ConfigMap, Deployment, Service.
 
     config_yaml is the rendered EndpointPickerConfig the picker runs with; it
@@ -545,7 +562,11 @@ def _epp_objects(name: str, ns: str, provider_config: str, config_yaml: str) -> 
             "selector": {"matchLabels": {"app": epp}},
             "template": {
                 "metadata": {
-                    "labels": {"app": epp},
+                    # The identity labels beside the selector label: they are
+                    # how the collector attributes a series off this pod to the
+                    # deployment and replica it routes for. Nothing selects on
+                    # them, so they can't collide with the selector above.
+                    "labels": {"app": epp, **base.fleet_labels(replica, _EPP_ROLE)},
                     "annotations": {"modelplane.ai/epp-config-checksum": config_checksum},
                 },
                 "spec": {
@@ -560,10 +581,27 @@ def _epp_objects(name: str, ns: str, provider_config: str, config_yaml: str) -> 
                                 "--pool-group=inference.networking.k8s.io",
                                 f"--config-file=/config/{_EPP_CONFIG_FILE}",
                                 "--grpc-port=9002",
+                                f"--metrics-port={_EPP_METRICS_PORT}",
+                                # The picker's metrics endpoint authenticates
+                                # its callers by TokenReview by default, which
+                                # needs the system:auth-delegator ClusterRole
+                                # its ServiceAccount does not hold and cannot
+                                # be given namespace-scoped. Left on, every
+                                # scrape is rejected. Off, the endpoint is
+                                # plain HTTP on the pod network, which is how
+                                # every engine already serves /metrics.
+                                #
+                                # --secure-serving is a different thing and
+                                # stays on: it is the TLS of the ext-proc gRPC
+                                # server Envoy calls, not of this.
+                                "--metrics-endpoint-auth=false",
                             ],
                             "ports": [
                                 {"name": "grpc", "containerPort": 9002},
                                 {"name": "grpc-health", "containerPort": 9003},
+                                # Named for the collector's engine scrape job,
+                                # which keeps a pod on this name.
+                                {"name": base.ENGINE_PORT_NAME, "containerPort": _EPP_METRICS_PORT},
                             ],
                             "volumeMounts": [{"name": "config", "mountPath": "/config"}],
                         }

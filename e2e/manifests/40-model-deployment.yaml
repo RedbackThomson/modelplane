@@ -53,6 +53,19 @@ spec:
                       def do_GET(self):
                           if self.path == "/health":
                               self._s({"status": "ok"})
+                          elif self.path == "/metrics":
+                              # Two real vLLM names, so the collector's built-in
+                              # renames have something to act on: one gauge and
+                              # one the fleet converts the unit of.
+                              b = (b'# TYPE vllm:num_requests_waiting gauge\n'
+                                   b'vllm:num_requests_waiting 3\n'
+                                   b'# TYPE DCGM_FI_DEV_FB_USED gauge\n'
+                                   b'DCGM_FI_DEV_FB_USED{gpu="0"} 1024\n')
+                              self.send_response(200)
+                              self.send_header("content-type", "text/plain")
+                              self.send_header("content-length", str(len(b)))
+                              self.end_headers()
+                              self.wfile.write(b)
                           elif self.path.startswith("/v1/models"):
                               self._s({"object": "list", "data": [{"id": served, "object": "model"}]})
                           else:

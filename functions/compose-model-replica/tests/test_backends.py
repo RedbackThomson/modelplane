@@ -35,6 +35,8 @@ from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 _SERVING = "modelplane.ai/serving"
+_ENGINE = "modelplane.ai/engine"
+_ROLE = "modelplane.ai/role"
 _WORKLOAD = "modelplane.ai/workload"
 _CLIQUE_ROLE = "modelplane.ai/clique-role"
 _QUEUE_LABEL = "kai.scheduler/queue"
@@ -206,14 +208,16 @@ _NATIVE_WANT = {
             "replicas": 1,
             "selector": {"matchLabels": {_WORKLOAD: _WORKLOAD_NAME}},
             "template": {
-                "metadata": {"labels": {_SERVING: "r", _WORKLOAD: _WORKLOAD_NAME}},
+                "metadata": {
+                    "labels": {_ENGINE: "main", _ROLE: "Standalone", _SERVING: "r", _WORKLOAD: _WORKLOAD_NAME}
+                },
                 "spec": {
                     "containers": [
                         {
                             "name": "engine",
                             "image": "vllm/vllm-openai:latest",
                             "args": ["--model=Qwen/Qwen3-0.6B"],
-                            "ports": [{"containerPort": 8000}],
+                            "ports": [{"name": "http", "containerPort": 8000}],
                             "resources": {"claims": [{"name": "devices"}]},
                             "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}],
                             "readinessProbe": {
@@ -283,7 +287,13 @@ def _pcs(leader_container: dict, worker_container: dict, *, worker_replicas: int
                 "cliques": [
                     {
                         "name": "leader",
-                        "labels": {_SERVING: "r", _QUEUE_LABEL: _QUEUE, _CLIQUE_ROLE: "leader"},
+                        "labels": {
+                            _ENGINE: "main",
+                            _ROLE: "Leader",
+                            _SERVING: "r",
+                            _QUEUE_LABEL: _QUEUE,
+                            _CLIQUE_ROLE: "leader",
+                        },
                         "spec": {
                             "roleName": "leader",
                             "replicas": 1,
@@ -293,7 +303,7 @@ def _pcs(leader_container: dict, worker_container: dict, *, worker_replicas: int
                     },
                     {
                         "name": "worker",
-                        "labels": {_QUEUE_LABEL: _QUEUE},
+                        "labels": {_ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE},
                         "spec": {
                             "roleName": "worker",
                             "replicas": worker_replicas,
@@ -336,7 +346,7 @@ def _engine(
     if env is not None:
         c["env"] = env
     if serving:
-        c["ports"] = [{"containerPort": 8000}]
+        c["ports"] = [{"name": "http", "containerPort": 8000}]
         c["readinessProbe"] = {
             "httpGet": {"path": "/health", "port": 8000},
             "initialDelaySeconds": 30,
@@ -481,7 +491,13 @@ class TestBackendManifests(unittest.TestCase):
         meta = out["model-serving-main"].spec.forProvider.manifest["spec"]["template"]["metadata"]
         self.assertEqual(
             meta["labels"],
-            {"example.com/role": "standalone", _SERVING: "r", _WORKLOAD: _WORKLOAD_NAME},
+            {
+                "example.com/role": "standalone",
+                _ENGINE: "main",
+                _ROLE: "Standalone",
+                _SERVING: "r",
+                _WORKLOAD: _WORKLOAD_NAME,
+            },
         )
         self.assertEqual(meta["annotations"], {"example.com/config": "standalone"})
 
@@ -502,11 +518,20 @@ class TestBackendManifests(unittest.TestCase):
         leader = _clique(manifest, "leader")
         self.assertEqual(
             leader["labels"],
-            {"example.com/role": "leader", _SERVING: "r", _QUEUE_LABEL: _QUEUE, _CLIQUE_ROLE: "leader"},
+            {
+                "example.com/role": "leader",
+                _ENGINE: "main",
+                _ROLE: "Leader",
+                _SERVING: "r",
+                _QUEUE_LABEL: _QUEUE,
+                _CLIQUE_ROLE: "leader",
+            },
         )
         self.assertEqual(leader["annotations"], {"example.com/config": "leader"})
         worker = _clique(manifest, "worker")
-        self.assertEqual(worker["labels"], {"example.com/role": "worker", _QUEUE_LABEL: _QUEUE})
+        self.assertEqual(
+            worker["labels"], {"example.com/role": "worker", _ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE}
+        )
         self.assertEqual(worker["annotations"], {"example.com/config": "worker"})
 
     def test_worker_without_metadata_composes_only_managed_labels(self) -> None:
@@ -517,7 +542,7 @@ class TestBackendManifests(unittest.TestCase):
         out = grove.GroveBackend().build(replica, engine, _PC, base.serving_label(replica), "Dynamo")
         manifest = out["model-serving-main"].spec.forProvider.manifest
         worker = _clique(manifest, "worker")
-        self.assertEqual(worker["labels"], {_QUEUE_LABEL: _QUEUE})
+        self.assertEqual(worker["labels"], {_ENGINE: "main", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE})
         self.assertNotIn("annotations", worker)
 
     @staticmethod
@@ -668,8 +693,13 @@ class TestLLMDBackend(unittest.TestCase):
         leader_labels = lwt["leaderTemplate"]["metadata"]["labels"]
         self.assertEqual(leader_labels[_SERVING], "r")
         self.assertEqual(leader_labels[self._LWS_ROLE], "leader")
-        # The worker followers never serve, so they carry no metadata at all.
-        self.assertNotIn("metadata", lwt["workerTemplate"])
+        # The worker followers never serve, so they carry no serving label and
+        # the replica's Service can't route to them. They do carry the
+        # telemetry identity: a worker holds GPUs, and its metrics are the
+        # deployment's.
+        worker_labels = lwt["workerTemplate"]["metadata"]["labels"]
+        self.assertNotIn(_SERVING, worker_labels)
+        self.assertEqual(worker_labels, {_ENGINE: "main", _ROLE: "Worker"})
 
     def test_leader_address_and_rank_env_injected(self) -> None:
         # Every gang container leads with the backend-neutral coordination vars
@@ -925,6 +955,44 @@ class TestDisaggregated(unittest.TestCase):
         self.assertEqual(pool["kind"], "InferencePool")
         self.assertEqual(pool["spec"]["endpointPickerRef"]["name"], "r-epp")
 
+    def test_the_picker_is_scrapeable_and_attributed(self) -> None:
+        """A built-in MetricMapping renames the picker's scheduling latency.
+
+        Nothing can match it unless something scrapes the picker, and the
+        collector's engine job keeps a pod on two things: the deployment
+        label, and a container port named `http`. Without both, the mapping
+        is config that matches nothing for the life of the fleet.
+
+        Its metrics endpoint authenticates callers by TokenReview by default,
+        which needs a ClusterRole the picker's namespaced ServiceAccount
+        cannot hold, so every scrape would be rejected. --secure-serving is
+        left alone: that one is the ext-proc gRPC server Envoy calls.
+        """
+        replica = _replica()
+        replica.metadata = metav1.ObjectMeta(
+            name="r",
+            namespace="ml-team",
+            labels={base.LABEL_DEPLOYMENT: "qwen3-8b", "modelplane.ai/replica-index": "2"},
+        )
+        replica.spec.serving = v1alpha1.Serving(mode="Unified")
+        composed = {}
+        for engine in replica.spec.engines:
+            composed.update(native.NativeBackend().build(replica, engine, _PC, base.serving_label(replica), "Standard"))
+        template = routing.apply(composed, replica, _PC)["epp"].spec.forProvider.manifest["spec"]["template"]
+
+        labels = template["metadata"]["labels"]
+        self.assertEqual(labels[base.LABEL_DEPLOYMENT], "qwen3-8b")
+        self.assertEqual(labels[base.LABEL_REPLICA], "2")
+        self.assertEqual(labels[base.LABEL_ROLE], "picker")
+        # Still the Deployment's own selector label, which must not move.
+        self.assertEqual(labels["app"], "r-epp")
+
+        container = next(c for c in template["spec"]["containers"] if c["name"] == "epp")
+        self.assertIn({"name": base.ENGINE_PORT_NAME, "containerPort": 9090}, container["ports"])
+        self.assertIn("--metrics-port=9090", container["args"])
+        self.assertIn("--metrics-endpoint-auth=false", container["args"])
+        self.assertNotIn("--secure-serving=false", container["args"])
+
     def test_injects_nixl_plumbing(self) -> None:
         """Both disagg engines get the NIXL plumbing the schema can't express:
         a Memory /dev/shm and VLLM_NIXL_SIDE_CHANNEL_HOST = pod IP."""
@@ -1029,6 +1097,19 @@ class TestDisaggregated(unittest.TestCase):
         self.assertEqual(sidecar["readinessProbe"]["timeoutSeconds"], 5)
         self.assertIn("--secure-proxy=false", sidecar["args"])
 
+    def test_a_decode_engine_keeps_a_scrapeable_port(self) -> None:
+        """The collector's engine job keeps a pod on the port named `http`.
+
+        Moving the decode engine off 8000 for the sidecar drops the name with
+        it, and the sidecar takes the port unnamed because it serves inference
+        rather than /metrics. A decode pod with no named port anywhere is one
+        nothing scrapes, so a disaggregated deployment reports half its
+        engines and the shortfall looks like idle capacity.
+        """
+        containers = self._serving_pod(self._apply(), "decode")["spec"]["containers"]
+        engine = next(c for c in containers if c["name"] == "engine")
+        self.assertEqual(engine["ports"], [{"name": base.ENGINE_PORT_NAME, "containerPort": 8001}])
+
     def test_prefill_has_no_sidecar(self) -> None:
         containers = self._serving_pod(self._apply(), "prefill")["spec"]["containers"]
         self.assertEqual([c["name"] for c in containers], ["engine"])
@@ -1099,7 +1180,7 @@ class TestDisaggregated(unittest.TestCase):
         worker_clique = _clique(manifest, "worker")
         worker = worker_clique["spec"]["podSpec"]
         self.assertEqual([c["name"] for c in worker["containers"]], ["engine"])
-        self.assertEqual(worker_clique["labels"], {_QUEUE_LABEL: _QUEUE})
+        self.assertEqual(worker_clique["labels"], {_ENGINE: "decode", _ROLE: "Worker", _QUEUE_LABEL: _QUEUE})
 
 
 class TestUnifiedRouting(unittest.TestCase):

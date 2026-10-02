@@ -240,7 +240,7 @@ fails, so don't mix one into a service that OpenAI callers use.
 
 Scrape an engine's own operational paths like `/metrics` and `/health` from the
 replica directly. See
-[Collecting engine metrics]({{< ref "/guides/collecting-engine-metrics" >}}).
+[Monitor the Fleet]({{< ref "/platform/telemetry" >}}).
 
 ## Example
 

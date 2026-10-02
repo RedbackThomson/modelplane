@@ -61,7 +61,7 @@ class NativeBackend:
             "name": "engine",
             "image": engine_container.image,
             "args": list(engine_container.args or []),
-            "ports": [{"containerPort": base.ENGINE_PORT}],
+            "ports": [{"name": base.ENGINE_PORT_NAME, "containerPort": base.ENGINE_PORT}],
             # vLLM tensor parallelism needs a large /dev/shm.
             "volumeMounts": [{"name": "dshm", "mountPath": "/dev/shm"}, *cache_volume_mounts],
             "readinessProbe": {
@@ -115,7 +115,10 @@ class NativeBackend:
             "spec": {
                 "replicas": int(engine.copies or 1),
                 "selector": {"matchLabels": selector},
-                "template": {"metadata": base.pod_metadata(member, pod_labels), "spec": pod_spec},
+                "template": {
+                    "metadata": base.pod_metadata(member, pod_labels, replica=replica, engine=engine),
+                    "spec": pod_spec,
+                },
             },
         }
 

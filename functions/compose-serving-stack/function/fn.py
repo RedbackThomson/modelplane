@@ -34,11 +34,16 @@ the gateway pair, its PKI, and the Usages sequencing the pair's teardown
 ahead of the Envoy Gateway release.
 """
 
+from typing import Any, TypeVar
+
 import grpc
-from crossplane.function import logging, resource, response
+import pydantic
+from crossplane.function import logging, request, resource, response
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from crossplane.function.proto.v1 import run_function_pb2_grpc as grpcv1
 from models.ai.modelplane.infrastructure.servingstack import v1alpha1
+from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
+from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 from models.io.crossplane.m.helm.providerconfig import v1beta1 as helmpcv1beta1
 from models.io.crossplane.m.helm.release import v1beta1 as helmv1beta1
 from models.io.crossplane.m.kubernetes.object import v1alpha1 as k8sobjv1alpha1
@@ -48,7 +53,10 @@ from models.io.crossplane.m.kubernetes.providerconfig import (
 from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
-from function import gateway, stacks
+from function import collector, gateway, stacks
+
+# The Pydantic model one required resource is parsed into.
+_T = TypeVar("_T", bound=pydantic.BaseModel)
 
 # Label key every rendered Release and Object carries, valued with its
 # composed-resource key, so Usage resourceSelectors can name any
@@ -267,6 +275,22 @@ def _ensure_trailing_newline(cert: str) -> str:
     return cert if cert.endswith("\n") else cert + "\n"
 
 
+# The label Crossplane stamps on a composed resource, naming the composite that
+# claimed it. A ServingStack's own name is generated and carries a suffix, so
+# this is what an operator calls the cluster.
+_LABEL_COMPOSITE = "crossplane.io/composite"
+
+
+def _cluster_name(xr: v1alpha1.ServingStack) -> str:
+    """The InferenceCluster this stack serves, as its operator named it.
+
+    Every series the collector exports is stamped with this, and a metric
+    labelled with a generated name matches nothing an operator would query for.
+    """
+    labels = (xr.metadata.labels if xr.metadata else None) or {}
+    return labels.get(_LABEL_COMPOSITE) or _name(xr.metadata)
+
+
 def _pc_name(xr: v1alpha1.ServingStack) -> str:
     """Derive the ProviderConfig name from the XR."""
     return resource.child_name(_name(xr.metadata), "cluster")
@@ -320,6 +344,7 @@ class Composer:
         rendered = self.compose_components(components)
         rendered += self.compose_gateway()
         rendered += self.compose_gateway_pki()
+        self.compose_collector()
         self.compose_component_usages(components)
         self.compose_gateway_usages()
         self.write_status()
@@ -743,6 +768,192 @@ class Composer:
         )
         rendered.append("gateway-client-auth")
         return rendered
+
+    def compose_collector(self) -> None:
+        """Compose the collector that gathers this cluster's telemetry.
+
+        Nothing until a TelemetryDestination exists. Neither collector stores
+        anything, so collecting with nowhere to export is GPU-cluster memory and
+        CPU spent on samples nobody will ever read; a fleet that has not said
+        where its telemetry goes gets none composed.
+
+        Ready on arrival, unlike everything else the stack composes. The
+        collector observes the fleet; nothing serving depends on it. Gating the
+        stack on it would put the fleet's ability to place a replica behind its
+        ability to export a metric, so one TelemetryDestination naming an
+        endpoint that has gone away would leave every InferenceCluster in the
+        fleet not Ready and stop the scheduler placing anything, anywhere. A
+        collector that cannot start reports it on its own objects and on the
+        TelemetryDestination, which is where that failure belongs.
+        """
+        response.require_resources(
+            self.rsp,
+            name="destinations",
+            api_version="modelplane.ai/v1alpha1",
+            kind="TelemetryDestination",
+        )
+        response.require_resources(
+            self.rsp,
+            name="mappings",
+            api_version="modelplane.ai/v1alpha1",
+            kind="MetricMapping",
+        )
+        if "destinations" not in self.req.required_resources or "mappings" not in self.req.required_resources:
+            return
+
+        # Sorted, not whichever the API server listed first: the collector
+        # restarts on a change to its rendered config, so an unstable order
+        # would redeploy it on alternate reconciles.
+        destinations = sorted(
+            self._parse("TelemetryDestination", tdv1alpha1.TelemetryDestination, "destinations"),
+            key=lambda d: _name(d.metadata),
+        )
+        if not destinations:
+            return
+        sinks, extensions = self.merge_destinations(destinations)
+
+        # The collector mounts each sink's credential as a Secret in its own
+        # namespace on this cluster, and the operator wrote one Secret, on the
+        # control plane. Resolve it here so it can be composed out there:
+        # without this the Deployment mounts a Secret nobody creates and the
+        # pod never starts, which is the one failure mode a destination with a
+        # credential would always hit.
+        secrets: dict[str, tuple[str, dict]] = {}
+        for sink in sinks:
+            if sink.secretRef is None:
+                continue
+            key = f"collector-secret-{sink.name}"
+            response.require_resources(
+                self.rsp,
+                name=key,
+                api_version="v1",
+                kind="Secret",
+                match_name=sink.secretRef.name,
+                namespace=_CLUSTER_RESOURCE_NAMESPACE,
+            )
+            if key not in self.req.required_resources:
+                return
+            found = request.get_required_resource(self.req, key)
+            # Resolved and absent is not a reason to withhold the collector.
+            # The TelemetryDestination reports a Secret that isn't there, and
+            # the pod waits for it the way any pod waits for a Secret, which is
+            # recoverable the moment the operator creates it.
+            if found and found.get("data"):
+                secrets[key] = (sink.secretRef.name, found["data"])
+
+        # Modelplane's own mappings first, then the operator's, which add to
+        # them rather than replacing them.
+        mappings = list(stacks.BUILTIN_MAPPINGS)
+        mappings += self._parse("MetricMapping", mmv1alpha1.MetricMapping, "mappings")
+
+        pc_observed = self.provider_configs_observed()
+        pc = _pc_name(self.xr)
+        for key, manifest, cel in collector.objects(
+            cluster=_cluster_name(self.xr),
+            mappings=mappings,
+            sinks=sinks,
+            extensions=extensions,
+        ):
+            if not (pc_observed or key in self.req.observed.resources):
+                continue
+            resource.update(
+                self.rsp.desired.resources[key],
+                _k8s_object(
+                    pc,
+                    manifest,
+                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
+                    ready_when=cel,
+                ),
+            )
+            self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+
+        for key, (secret_name, data) in secrets.items():
+            if not (pc_observed or key in self.req.observed.resources):
+                continue
+            # Same name, same namespace, other cluster, so the Deployment's
+            # mount needs nothing rewritten. The base64 `data` is copied
+            # verbatim: decoding and re-encoding would corrupt a credential
+            # that isn't text.
+            resource.update(
+                self.rsp.desired.resources[key],
+                _k8s_object(
+                    pc,
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": secret_name, "namespace": collector.NAMESPACE},
+                        "data": data,
+                    },
+                    metadata=metav1.ObjectMeta(labels={_LABEL_RESOURCE: key}),
+                ),
+            )
+            self.rsp.desired.resources[key].ready = fnv1.READY_TRUE
+
+    def _parse(self, kind: str, model: type[_T], key: str) -> list[_T]:
+        """Parse the required resources under `key`, skipping what won't.
+
+        An object the API server stored under an older schema still comes back
+        on read - a CRD's validation runs on write, not on what is already
+        there - so one MetricMapping written before a field was required is
+        enough to raise here. Raising fails the whole pipeline step, which
+        takes down the serving stack: the fleet stops placing replicas because
+        a telemetry object is out of date.
+
+        So a parse failure drops that object and says so, the same reasoning
+        that keeps the collector out of the stack's readiness. The rest of the
+        fleet's telemetry carries on without it.
+        """
+        out: list[_T] = []
+        for obj in request.get_required_resources(self.req, key):
+            try:
+                out.append(model.model_validate(obj))
+            except pydantic.ValidationError as err:
+                name = (obj.get("metadata") or {}).get("name", "<unnamed>")
+                response.warning(
+                    self.rsp,
+                    f"Ignoring {kind} {name}: it does not match the current schema "
+                    f"({err.error_count()} problems), so nothing it asks for is collected.",
+                )
+        return out
+
+    def merge_destinations(
+        self, destinations: list[tdv1alpha1.TelemetryDestination]
+    ) -> tuple[list[tdv1alpha1.Sink], dict[str, Any]]:
+        """Every destination's sinks and extensions, as one collector config.
+
+        Concatenated rather than one of them chosen, so a second backend is a
+        second object rather than an edit to a singleton somebody else owns.
+        Every sink gets the whole stream either way, so the fleet exports to
+        all of them.
+
+        A sink names the collector's exporter instance, and two destinations
+        naming a sink the same way would be one exporter with two meanings.
+        The destination that sorts first keeps the name and the other is
+        dropped with a warning, because taking the whole fleet's telemetry
+        down over a name collision is the worse failure. Extensions collide
+        the same way and resolve the same way.
+        """
+        sinks: dict[str, tdv1alpha1.Sink] = {}
+        extensions: dict[str, Any] = {}
+        clashes: list[str] = []
+        for dest in destinations:
+            name = _name(dest.metadata)
+            for sink in dest.spec.sinks:
+                if sink.name in sinks:
+                    clashes.append(f"sink {sink.name} in TelemetryDestination {name}")
+                    continue
+                sinks[sink.name] = sink
+            for key, value in (dest.spec.extensions or {}).items():
+                if key in extensions:
+                    clashes.append(f"extension {key} in TelemetryDestination {name}")
+                    continue
+                extensions[key] = value
+        if clashes:
+            response.warning(
+                self.rsp,
+                f"Ignored {', '.join(clashes)}: already defined by a TelemetryDestination sorting earlier.",
+            )
+        return list(sinks.values()), extensions
 
     def compose_gateway_usages(self) -> None:
         """Compose Usages ordering the hand-rendered gateway teardown.

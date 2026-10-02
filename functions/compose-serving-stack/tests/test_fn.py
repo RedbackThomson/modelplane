@@ -93,6 +93,28 @@ def _crds(filename: str) -> list[dict]:
     ]
 
 
+class TestClusterName(unittest.TestCase):
+    """The name every exported series is stamped with."""
+
+    def _stack(self, labels: dict[str, str] | None) -> v1alpha1.ServingStack:
+        return v1alpha1.ServingStack(
+            metadata=metav1.ObjectMeta(name="local-serving-stack-d4206", labels=labels),
+            spec=v1alpha1.Spec(
+                cloud="Existing",
+                secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
+                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+            ),
+        )
+
+    def test_it_is_the_composite_an_operator_named(self) -> None:
+        """A ServingStack's own name is generated and carries a suffix."""
+        self.assertEqual(fn._cluster_name(self._stack({"crossplane.io/composite": "local"})), "local")
+
+    def test_it_falls_back_to_the_stack(self) -> None:
+        """Better a generated name on the series than none at all."""
+        self.assertEqual(fn._cluster_name(self._stack(None)), "local-serving-stack-d4206")
+
+
 def _request(cloud: str, stack: str, observed: dict | None = None) -> fnv1.RunFunctionRequest:
     """Build a RunFunctionRequest for a test-backend ServingStack."""
     return fnv1.RunFunctionRequest(
@@ -829,7 +851,12 @@ def _existing_dynamo_stack() -> dict[str, fnv1.Resource]:
 
 
 def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -> fnv1.RunFunctionResponse:
-    """A whole expected response: 60s TTL, empty context, the XR status."""
+    """A whole expected response: 60s TTL, empty context, the XR status.
+
+    Every response asks for the telemetry kinds, because the collector is
+    composed from them and the function cannot know whether any exist until
+    they resolve.
+    """
     return fnv1.RunFunctionResponse(
         meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
         desired=fnv1.State(
@@ -837,6 +864,14 @@ def _response(resources: dict[str, fnv1.Resource], status: dict | None = None) -
             resources=resources,
         ),
         context=structpb.Struct(),
+        requirements=fnv1.Requirements(
+            resources={
+                "destinations": fnv1.ResourceSelector(
+                    api_version="modelplane.ai/v1alpha1", kind="TelemetryDestination"
+                ),
+                "mappings": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="MetricMapping"),
+            }
+        ),
     )
 
 
@@ -1455,3 +1490,217 @@ class TestKeyInventory(unittest.IsolatedAsyncioTestCase):
                         )
                     got = await self.runner.RunFunction(_request(cloud, stack, observed=observed), None)
                     self.assertEqual(expected, set(got.desired.resources.keys()))
+
+
+class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
+    """The collector is composed, but the stack never waits on it."""
+
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = fn.FunctionRunner()
+
+    @staticmethod
+    def _with_destination(req: fnv1.RunFunctionRequest, *, secret: str | None = None) -> fnv1.RunFunctionRequest:
+        sink: dict = {"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}
+        if secret:
+            sink |= {"secretRef": {"name": secret}, "auth": {"bearerTokenKey": "token"}}
+        req.required_resources["destinations"].items.append(
+            fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    {
+                        "apiVersion": "modelplane.ai/v1alpha1",
+                        "kind": "TelemetryDestination",
+                        "metadata": {"name": "acme"},
+                        "spec": {"sinks": [sink]},
+                    }
+                )
+            )
+        )
+        req.required_resources["mappings"].items.extend([])
+        if secret:
+            req.required_resources["collector-secret-primary"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "v1",
+                            "kind": "Secret",
+                            "metadata": {"name": secret, "namespace": "modelplane-system"},
+                            "data": {"token": "c2hoaGg="},
+                        }
+                    )
+                )
+            )
+        return req
+
+    async def test_the_collector_does_not_gate_the_stack(self) -> None:
+        """A collector nothing has observed yet is still Ready.
+
+        Everything else the stack composes is Ready only once its observed
+        Ready condition says so, because the fleet cannot serve without it.
+        The collector only watches, so gating on it would put placing a
+        replica behind exporting a metric: one destination pointing at an
+        endpoint that has gone away would take every InferenceCluster in the
+        fleet out of Ready and stop the scheduler.
+        """
+        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+        got = await self.runner.RunFunction(req, None)
+        collector_keys = [k for k in got.desired.resources if k == "collector" or k.startswith("collector-")]
+        # The Deployment, which is the one with a readiness CEL of its own and
+        # so the one that would have gated the stack.
+        self.assertIn("collector", collector_keys)
+        for key in collector_keys:
+            with self.subTest(key=key):
+                self.assertNotIn(key, req.observed.resources)
+                self.assertEqual(got.desired.resources[key].ready, fnv1.READY_TRUE)
+
+    async def test_the_credential_reaches_the_cluster_that_mounts_it(self) -> None:
+        """The operator writes one Secret; the collector mounts it elsewhere.
+
+        A TelemetryDestination is cluster-scoped on the control plane and the
+        collector runs on every workload cluster in the fleet. Resolving the
+        Secret and stopping there leaves the Deployment mounting a name
+        nothing out there creates, so the pod never starts and the fleet
+        exports nothing - the failure every destination with a credential
+        would hit, which is every destination that reaches a real backend.
+        """
+        req = self._with_destination(
+            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
+        )
+        got = await self.runner.RunFunction(req, None)
+        self.assertIn("collector-secret-primary", got.desired.resources)
+        composed = resource.struct_to_dict(got.desired.resources["collector-secret-primary"].resource)
+        manifest = composed["spec"]["forProvider"]["manifest"]
+        self.assertEqual(manifest["kind"], "Secret")
+        self.assertEqual(manifest["metadata"]["name"], "telemetry-credentials")
+        self.assertEqual(manifest["metadata"]["namespace"], "modelplane-system")
+        # Copied verbatim: re-encoding would corrupt a credential that is not
+        # text, and the mount reads the same key the sink's auth names.
+        self.assertEqual(manifest["data"], {"token": "c2hoaGg="})
+
+    async def test_a_destination_asks_for_its_credential_in_one_namespace(self) -> None:
+        """Unqualified, the requirement matches a Secret of that name anywhere."""
+        req = self._with_destination(
+            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
+        )
+        got = await self.runner.RunFunction(req, None)
+        selector = got.requirements.resources["collector-secret-primary"]
+        self.assertEqual(selector.match_name, "telemetry-credentials")
+        self.assertEqual(selector.namespace, "modelplane-system")
+
+    async def test_every_destination_contributes_its_sinks(self) -> None:
+        """A second backend is a second object, not an edit to a singleton.
+
+        Picking one destination and warning about the rest means a team
+        adding an export has to edit an object another team owns, and gets
+        silence if they create their own instead.
+        """
+        req = _request("GKE", "Standard", observed=_observed_pcs())
+        for name, sink in (
+            ("acme", {"name": "vendor", "type": "otlphttp", "endpoint": "https://otel.vendor.example"}),
+            ("zeta", {"name": "prom", "type": "prometheus_remote_write", "endpoint": "https://p.example/w"}),
+        ):
+            req.required_resources["destinations"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "modelplane.ai/v1alpha1",
+                            "kind": "TelemetryDestination",
+                            "metadata": {"name": name},
+                            "spec": {"sinks": [sink]},
+                        }
+                    )
+                )
+            )
+        req.required_resources["mappings"].items.extend([])
+        got = await self.runner.RunFunction(req, None)
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertEqual(
+            sorted(config["exporters"]),
+            ["otlphttp/vendor", "prometheus_remote_write/prom"],
+        )
+        self.assertEqual(
+            sorted(config["service"]["pipelines"]["metrics"]["exporters"]),
+            ["otlphttp/vendor", "prometheus_remote_write/prom"],
+        )
+
+    async def test_two_destinations_cannot_name_one_exporter(self) -> None:
+        """A sink names the collector's exporter instance.
+
+        Two of them under one name is one exporter with two meanings. The
+        destination sorting first keeps it and the other is dropped with a
+        warning, rather than failing the whole fleet's telemetry over a name.
+        """
+        req = _request("GKE", "Standard", observed=_observed_pcs())
+        for name, endpoint in (("acme", "https://a.example"), ("zeta", "https://z.example")):
+            req.required_resources["destinations"].items.append(
+                fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {
+                            "apiVersion": "modelplane.ai/v1alpha1",
+                            "kind": "TelemetryDestination",
+                            "metadata": {"name": name},
+                            "spec": {"sinks": [{"name": "primary", "type": "otlphttp", "endpoint": endpoint}]},
+                        }
+                    )
+                )
+            )
+        req.required_resources["mappings"].items.extend([])
+        got = await self.runner.RunFunction(req, None)
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertEqual(list(config["exporters"]), ["otlphttp/primary"])
+        self.assertEqual(config["exporters"]["otlphttp/primary"]["endpoint"], "https://a.example")
+        self.assertTrue([r for r in got.results if "zeta" in r.message])
+
+    async def test_a_stale_mapping_does_not_break_the_stack(self) -> None:
+        """A CRD validates on write, not on what it already stored.
+
+        A MetricMapping written against an older schema comes back on read
+        exactly as it was stored, so a value the enum no longer carries
+        reaches the parser. Parsing it raises, and raising fails the whole
+        pipeline step - so the serving stack composes nothing and the fleet
+        stops placing replicas, because one telemetry object is out of date.
+        Seen on a real cluster, where a mapping predating a required field
+        did it.
+        """
+        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+        req.required_resources["mappings"].items.append(
+            fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    {
+                        "apiVersion": "modelplane.ai/v1alpha1",
+                        "kind": "MetricMapping",
+                        "metadata": {"name": "stale"},
+                        # A unit the enum no longer carries.
+                        "spec": {
+                            "metrics": [
+                                {
+                                    "from": "old_engine_transfer",
+                                    "to": "modelplane_request_kv_transfer_seconds",
+                                    "fromUnit": "Centiseconds",
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+        )
+        got = await self.runner.RunFunction(req, None)
+        # The stack still composes, and says what it dropped.
+        self.assertIn("collector", got.desired.resources)
+        self.assertTrue([r for r in got.results if "stale" in r.message])
+        config = yaml.safe_load(
+            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
+                "manifest"
+            ]["data"]["collector.yaml"]
+        )
+        self.assertNotIn("old_engine_waiting", yaml.safe_dump(config))

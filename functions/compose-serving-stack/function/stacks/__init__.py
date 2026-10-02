@@ -21,12 +21,14 @@ none does), common.py for the components on every stack, and the
 stack's own file. See design/serving-stack-generation.md.
 """
 
-from function.stacks import common, components, dynamo, standard
+from function.stacks import common, components, dynamo, metrics, standard
 from function.stacks.clouds import civo, existing, nebius, vultr
 from function.stacks.clouds.generated.aicr import aks, eks, gke
 from function.stacks.components import Chart, Cloud, Component, Manifests, Stack
+from function.stacks.metrics import BUILTIN_MAPPINGS
 
 __all__ = [
+    "BUILTIN_MAPPINGS",
     "Chart",
     "Cloud",
     "Component",
@@ -35,6 +37,7 @@ __all__ = [
     "clouds",
     "components",
     "join",
+    "metrics",
     "stacks",
 ]
 

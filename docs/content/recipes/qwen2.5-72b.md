@@ -69,7 +69,7 @@ under the same model name:
 
 Both GPUs now serve the same workload, so their engine metrics give a direct
 performance comparison: scrape each replica's latency and throughput as in
-[Collecting engine metrics]({{< ref "/guides/collecting-engine-metrics.md" >}}) and
+[Monitor the Fleet]({{< ref "/platform/telemetry.md" >}}) and
 read the two side by side. Weights are relative, so once one platform wins,
 shift the 50/50 toward it - 80/20, and as far as 100/0 - without touching the
 deployment.

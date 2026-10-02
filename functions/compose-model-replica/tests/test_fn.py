@@ -197,6 +197,9 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                                                 "template": {
                                                     "metadata": {
                                                         "labels": {
+                                                            "modelplane.ai/deployment": "my-deployment",
+                                                            "modelplane.ai/engine": "main",
+                                                            "modelplane.ai/role": "Standalone",
                                                             "modelplane.ai/serving": "test-replica",
                                                             "modelplane.ai/workload": resource.child_name(
                                                                 "test-replica", "main"
@@ -209,7 +212,7 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                                                                 "name": "engine",
                                                                 "image": "vllm/vllm-openai:latest",
                                                                 "args": ["--model=Qwen/Qwen3-0.6B"],
-                                                                "ports": [{"containerPort": 8000}],
+                                                                "ports": [{"name": "http", "containerPort": 8000}],
                                                                 "resources": {"claims": [{"name": "devices"}]},
                                                                 "volumeMounts": [
                                                                     {"name": "dshm", "mountPath": "/dev/shm"},
