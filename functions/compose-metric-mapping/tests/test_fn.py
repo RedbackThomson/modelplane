@@ -14,14 +14,16 @@
 
 """Tests for the compose-metric-mapping function."""
 
+import asyncio
 import dataclasses
-import unittest
+import json
 
-from crossplane.function import logging, resource
+import pytest
+from crossplane.function import resource
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from function import fn
 from google.protobuf import duration_pb2 as durationpb
-from google.protobuf import json_format
+from google.protobuf import json_format, message
 from google.protobuf import struct_pb2 as structpb
 
 
@@ -34,105 +36,96 @@ class Case:
     want: fnv1.RunFunctionResponse
 
 
-def setUpModule() -> None:
-    logging.configure(level=logging.Level.DISABLED)
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
 
 
-class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
-    """Tests for FunctionRunner.RunFunction."""
+def _compose_cases() -> list[Case]:
+    mapping = {
+        "apiVersion": "modelplane.ai/v1alpha1",
+        "kind": "MetricMapping",
+        "metadata": {"name": "my-engine"},
+        "spec": {
+            "metrics": [{"from": "my_engine_queued", "to": "modelplane_requests_waiting"}],
+        },
+    }
+    cluster = resource.dict_to_struct(
+        {"apiVersion": "modelplane.ai/v1alpha1", "kind": "InferenceCluster", "metadata": {"name": "prod-us-east"}}
+    )
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
+    def req(xr: dict, clusters: list | None) -> fnv1.RunFunctionRequest:
+        r = fnv1.RunFunctionRequest(
+            observed=fnv1.State(composite=fnv1.Resource(resource=resource.dict_to_struct(xr))),
+        )
+        if clusters is not None:
+            r.required_resources["clusters"].items.extend([fnv1.Resource(resource=c) for c in clusters])
+        return r
 
-    async def test_compose(self) -> None:
-        """The function reports whether a mapping reaches any cluster."""
-        mapping = {
-            "apiVersion": "modelplane.ai/v1alpha1",
-            "kind": "MetricMapping",
-            "metadata": {"name": "my-engine"},
-            "spec": {
-                "metrics": [{"from": "my_engine_queued", "to": "modelplane_requests_waiting"}],
-            },
-        }
-        cluster = resource.dict_to_struct(
-            {"apiVersion": "modelplane.ai/v1alpha1", "kind": "InferenceCluster", "metadata": {"name": "prod-us-east"}}
+    def want(ready: fnv1.Ready, status: dict | None, cond: fnv1.Condition) -> fnv1.RunFunctionResponse:
+        composite = fnv1.Resource(ready=ready)
+        if status is not None:
+            composite.resource.CopyFrom(resource.dict_to_struct(status))
+        return fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=composite),
+            conditions=[cond],
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "clusters": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceCluster")
+                }
+            ),
         )
 
-        def req(xr: dict, clusters: list | None) -> fnv1.RunFunctionRequest:
-            r = fnv1.RunFunctionRequest(
-                observed=fnv1.State(composite=fnv1.Resource(resource=resource.dict_to_struct(xr))),
-            )
-            if clusters is not None:
-                r.required_resources["clusters"].items.extend([fnv1.Resource(resource=c) for c in clusters])
-            return r
-
-        def want(ready: fnv1.Ready, status: dict | None, cond: fnv1.Condition) -> fnv1.RunFunctionResponse:
-            composite = fnv1.Resource(ready=ready)
-            if status is not None:
-                composite.resource.CopyFrom(resource.dict_to_struct(status))
-            return fnv1.RunFunctionResponse(
-                meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                desired=fnv1.State(composite=composite),
-                conditions=[cond],
-                context=structpb.Struct(),
-                requirements=fnv1.Requirements(
-                    resources={
-                        "clusters": fnv1.ResourceSelector(api_version="modelplane.ai/v1alpha1", kind="InferenceCluster")
-                    }
-                ),
-            )
-
-        cases = [
-            Case(
-                name="ready, and says how many clusters took the renames",
-                req=req(mapping, [cluster, cluster]),
-                want=want(
-                    fnv1.READY_TRUE,
-                    {"status": {"clusters": 2}},
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_TRUE,
-                        reason="Available",
-                        message="Renaming 1 metric(s) on 2 inference cluster(s)",
-                    ),
+    return [
+        Case(
+            name="ready, and says how many clusters took the renames",
+            req=req(mapping, [cluster, cluster]),
+            want=want(
+                fnv1.READY_TRUE,
+                {"status": {"clusters": 2}},
+                fnv1.Condition(
+                    type="Accepted",
+                    status=fnv1.STATUS_CONDITION_TRUE,
+                    reason="Available",
+                    message="Renaming 1 metric(s) on 2 inference cluster(s)",
                 ),
             ),
-            Case(
-                name="not ready when no cluster exists to render into",
-                req=req(mapping, []),
-                want=want(
-                    fnv1.READY_FALSE,
-                    {"status": {"clusters": 0}},
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_FALSE,
-                        reason="NoClusters",
-                        message="No inference cluster to render these renames into",
-                    ),
+        ),
+        Case(
+            name="not ready when no cluster exists to render into",
+            req=req(mapping, []),
+            want=want(
+                fnv1.READY_FALSE,
+                {"status": {"clusters": 0}},
+                fnv1.Condition(
+                    type="Accepted",
+                    status=fnv1.STATUS_CONDITION_FALSE,
+                    reason="NoClusters",
+                    message="No inference cluster to render these renames into",
                 ),
             ),
-            Case(
-                name="waits for the clusters to resolve",
-                req=req(mapping, None),
-                want=want(
-                    fnv1.READY_FALSE,
-                    None,
-                    fnv1.Condition(
-                        type="Accepted",
-                        status=fnv1.STATUS_CONDITION_FALSE,
-                        reason="WaitingForClusters",
-                        message="Waiting for the inference clusters to resolve",
-                    ),
+        ),
+        Case(
+            name="waits for the clusters to resolve",
+            req=req(mapping, None),
+            want=want(
+                fnv1.READY_FALSE,
+                None,
+                fnv1.Condition(
+                    type="Accepted",
+                    status=fnv1.STATUS_CONDITION_FALSE,
+                    reason="WaitingForClusters",
+                    message="Waiting for the inference clusters to resolve",
                 ),
             ),
-        ]
+        ),
+    ]
 
-        for case in cases:
-            with self.subTest(case.name):
-                got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
+
+@pytest.mark.parametrize("case", _compose_cases(), ids=lambda case: case.name)
+def test_compose(case: Case) -> None:
+    """The function reports whether a mapping reaches any cluster."""
+    got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
+    assert _to_dict(got) == _to_dict(case.want)

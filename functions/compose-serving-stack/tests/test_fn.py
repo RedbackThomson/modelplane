@@ -23,17 +23,19 @@ identity contract; renaming a key deletes and recreates the remote
 resource - for every cloud and stack, as frozen literals.
 """
 
+import asyncio
 import copy
 import dataclasses
+import json
 import pathlib
-import unittest
 
+import pytest
 import yaml
-from crossplane.function import logging, resource
+from crossplane.function import resource
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from function import fn
 from google.protobuf import duration_pb2 as durationpb
-from google.protobuf import json_format
+from google.protobuf import json_format, message
 from google.protobuf import struct_pb2 as structpb
 from models.ai.modelplane.infrastructure.servingstack import v1alpha1
 from models.io.crossplane.m.helm.providerconfig import v1beta1 as helmpcv1beta1
@@ -44,11 +46,6 @@ from models.io.crossplane.m.kubernetes.providerconfig import (
 )
 from models.io.crossplane.protection.usage import v1beta1 as usagev1beta1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
-
-
-def setUpModule() -> None:
-    logging.configure(level=logging.Level.DISABLED)
-
 
 # Precomputed child_name value for test-backend.
 _PC_NAME = "test-backend-cluster-63fde"
@@ -93,26 +90,25 @@ def _crds(filename: str) -> list[dict]:
     ]
 
 
-class TestClusterName(unittest.TestCase):
-    """The name every exported series is stamped with."""
+def _stack(labels: dict[str, str] | None) -> v1alpha1.ServingStack:
+    return v1alpha1.ServingStack(
+        metadata=metav1.ObjectMeta(name="local-serving-stack-d4206", labels=labels),
+        spec=v1alpha1.Spec(
+            cloud="Existing",
+            secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
+            gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+        ),
+    )
 
-    def _stack(self, labels: dict[str, str] | None) -> v1alpha1.ServingStack:
-        return v1alpha1.ServingStack(
-            metadata=metav1.ObjectMeta(name="local-serving-stack-d4206", labels=labels),
-            spec=v1alpha1.Spec(
-                cloud="Existing",
-                secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
-                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
-            ),
-        )
 
-    def test_it_is_the_composite_an_operator_named(self) -> None:
-        """A ServingStack's own name is generated and carries a suffix."""
-        self.assertEqual(fn._cluster_name(self._stack({"crossplane.io/composite": "local"})), "local")
+def test_it_is_the_composite_an_operator_named() -> None:
+    """A ServingStack's own name is generated and carries a suffix."""
+    assert fn._cluster_name(_stack({"crossplane.io/composite": "local"})) == "local"
 
-    def test_it_falls_back_to_the_stack(self) -> None:
-        """Better a generated name on the series than none at all."""
-        self.assertEqual(fn._cluster_name(self._stack(None)), "local-serving-stack-d4206")
+
+def test_it_falls_back_to_the_stack() -> None:
+    """Better a generated name on the series than none at all."""
+    assert fn._cluster_name(_stack(None)) == "local-serving-stack-d4206"
 
 
 def _request(cloud: str, stack: str, observed: dict | None = None) -> fnv1.RunFunctionRequest:
@@ -882,429 +878,415 @@ class Case:
     want: fnv1.RunFunctionResponse
 
 
-class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
-    maxDiff = None
+def _compose_cases() -> list[Case]:
+    """The test_compose cases, built from the Existing/Dynamo stack's resources."""
+    full = _provider_configs() | _EXISTING_DYNAMO_USAGES | _existing_dynamo_stack()
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
+    # Second pass: PCs observed. depends_on gates first creation, so
+    # only the dependency-free wave renders; each dependent waits for
+    # its dependency's Ready before it is first created.
+    dep_gated = {
+        "envoy-gateway",  # -> cert-manager
+        "ai-gateway",  # -> ai-gateway-crds
+        "gateway-proxy",  # -> gateway-namespace
+        "kai-queue-root",  # -> kai-scheduler
+        "kai-queue",  # -> kai-scheduler
+        "modelexpress-server",  # -> modelexpress-crds
+        "gateway-selfsigned-issuer",  # -> cert-manager, gateway-namespace
+        "trust-manager",  # -> gateway-selfsigned-issuer
+    }
+    first_wave = {k: v for k, v in full.items() if k not in dep_gated}
 
-    async def test_compose(self) -> None:
-        full = _provider_configs() | _EXISTING_DYNAMO_USAGES | _existing_dynamo_stack()
+    # Third pass: every rendered resource observed Ready (the gateway
+    # with its address assigned), so everything is marked ready and
+    # the address lands in the XR status.
+    rendered = [k for k in _existing_dynamo_stack() if k != "gateway"]
+    observed_ready = _observed_pcs()
+    for key in rendered:
+        observed_ready[key] = fnv1.Resource(
+            resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
+        )
+    observed_ready["gateway"] = fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "atProvider": {
+                        "manifest": {"status": {"addresses": [{"type": "IPAddress", "value": "203.0.113.7"}]}},
+                    },
+                },
+            }
+        )
+    )
+    # Every component observed Ready; PCs and Usages are ready on arrival.
+    all_ready = copy.deepcopy(full)
+    for res in all_ready.values():
+        res.ready = fnv1.READY_TRUE
 
-        # Second pass: PCs observed. depends_on gates first creation, so
-        # only the dependency-free wave renders; each dependent waits for
-        # its dependency's Ready before it is first created.
-        dep_gated = {
-            "envoy-gateway",  # -> cert-manager
-            "ai-gateway",  # -> ai-gateway-crds
-            "gateway-proxy",  # -> gateway-namespace
-            "kai-queue-root",  # -> kai-scheduler
-            "kai-queue",  # -> kai-scheduler
-            "modelexpress-server",  # -> modelexpress-crds
-            "gateway-selfsigned-issuer",  # -> cert-manager, gateway-namespace
-            "trust-manager",  # -> gateway-selfsigned-issuer
+    return [
+        Case(
+            name="first pass composes only the provider configs and usages",
+            req=_request("Existing", "Dynamo"),
+            # Everything targeting the remote cluster is gated on the
+            # ProviderConfigs having been observed; Usages reference
+            # nothing remote and compose immediately. The unready
+            # ProviderConfigs keep the composite unready until the
+            # stack actually renders.
+            want=_response(_provider_configs(ready=False) | _EXISTING_DYNAMO_USAGES),
+        ),
+        Case(
+            name="second pass renders the dependency-free wave",
+            req=_request("Existing", "Dynamo", observed=_observed_pcs()),
+            want=_response(first_wave),
+        ),
+        Case(
+            name="all dependencies ready renders the whole stack, marks it ready, and writes the gateway address",
+            req=_request("Existing", "Dynamo", observed=observed_ready),
+            want=_response(all_ready, status={"gateway": {"address": "203.0.113.7"}}),
+        ),
+    ]
+
+
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
+
+
+@pytest.mark.parametrize("case", _compose_cases(), ids=lambda case: case.name)
+def test_compose(case: Case) -> None:
+    """RunFunction composes the Existing/Dynamo stack across the reconcile passes."""
+    got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
+    assert _to_dict(got) == _to_dict(case.want)
+
+
+def test_identity_secret_type_flows_to_provider_configs() -> None:
+    """A non-GCP identity secret's type and namespace reach both ProviderConfigs verbatim."""
+    # The type is stamped as is rather than being forced to
+    # GoogleApplicationCredentials, and the secret's own namespace wins over
+    # the XR's.
+    req = fnv1.RunFunctionRequest(
+        observed=fnv1.State(
+            composite=fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    v1alpha1.ServingStack(
+                        metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
+                        spec=v1alpha1.Spec(
+                            cloud="Nebius",
+                            secrets=[
+                                v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
+                                v1alpha1.Secret(
+                                    type="NebiusServiceAccountCredentials",
+                                    name="nebius-secret",
+                                    key="credentials.json",
+                                    namespace="other-ns",
+                                ),
+                            ],
+                            gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+                        ),
+                    ).model_dump(exclude_none=True, mode="json")
+                ),
+            ),
+        ),
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    pc = resource.struct_to_dict(got.desired.resources["provider-config-kubernetes"].resource)
+    assert pc["spec"]["identity"]["type"] == "NebiusServiceAccountCredentials"
+    assert pc["spec"]["identity"]["secretRef"]["namespace"] == "other-ns"
+    helm_pc = resource.struct_to_dict(got.desired.resources["provider-config-helm"].resource)
+    assert helm_pc["spec"]["identity"]["type"] == "NebiusServiceAccountCredentials"
+
+
+def test_gpu_pool_nvlink_disable_flows_to_components() -> None:
+    """A Civo ServingStack whose spec.gpu flags a pool for NVLink
+    disable composes the gpu-operator release in NVIDIADriver-CRD
+    mode, the kernel module ConfigMap, and a per-pool NVIDIADriver
+    selecting that pool's nodes - and only that pool's."""
+    # The install gate composes a component once its dependencies are
+    # observed Ready; observe the chain up to the per-pool driver.
+    observed = _observed_pcs()
+    for key in (
+        "cert-manager",
+        "node-feature-discovery",
+        "gpu-operator",
+        "nvlink-disable-config-gpu-operator",
+        "nvlink-disable-config-nvidia-kernel-config",
+    ):
+        observed[key] = fnv1.Resource(
+            resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
+        )
+    req = fnv1.RunFunctionRequest(
+        observed=fnv1.State(
+            composite=fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    v1alpha1.ServingStack(
+                        metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
+                        spec=v1alpha1.Spec(
+                            cloud="Civo",
+                            secrets=[
+                                v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
+                            ],
+                            gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+                            gpu=v1alpha1.Gpu(
+                                pools=[v1alpha1.Pool(name="h100-pool", disableNvLink=True)],
+                            ),
+                        ),
+                    ).model_dump(exclude_none=True, mode="json")
+                ),
+            ),
+            resources=observed,
+        ),
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+
+    release = resource.struct_to_dict(got.desired.resources["gpu-operator"].resource)
+    assert release["spec"]["forProvider"]["values"]["driver"]["nvidiaDriverCRD"] == {
+        "enabled": True,
+        "deployDefaultCR": True,
+    }
+
+    config = resource.struct_to_dict(got.desired.resources["nvlink-disable-config-nvidia-kernel-config"].resource)
+    assert config["spec"]["forProvider"]["manifest"]["data"] == {"nvidia.conf": "options nvidia NVreg_NvLinkDisable=1"}
+
+    driver = resource.struct_to_dict(got.desired.resources["nvlink-disabled-driver-h100-pool"].resource)
+    manifest = driver["spec"]["forProvider"]["manifest"]
+    assert manifest["kind"] == "NVIDIADriver"
+    assert manifest["spec"]["nodeSelector"] == {"modelplane.ai/pool": "h100-pool"}
+    assert manifest["spec"]["kernelModuleConfig"] == {"name": "nvidia-kernel-config"}
+
+    # The derived Usages hold the operator release and the ConfigMap
+    # until the per-pool driver is gone.
+    assert "usage-gpu-operator-by-nvlink-disabled-driver-h100-pool" in got.desired.resources
+
+
+def test_gpu_pool_without_nvlink_disable_changes_nothing() -> None:
+    """A Civo ServingStack whose spec.gpu flags no pool composes the
+    stock component list: ClusterPolicy-managed driver, no NVIDIADriver
+    or kernel module ConfigMap objects."""
+    observed = _observed_pcs()
+    observed["gpu-operator"] = fnv1.Resource(
+        resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
+    )
+    req = fnv1.RunFunctionRequest(
+        observed=fnv1.State(
+            composite=fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    v1alpha1.ServingStack(
+                        metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
+                        spec=v1alpha1.Spec(
+                            cloud="Civo",
+                            secrets=[
+                                v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
+                            ],
+                            gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
+                            gpu=v1alpha1.Gpu(
+                                pools=[v1alpha1.Pool(name="l40s-pool", disableNvLink=False)],
+                            ),
+                        ),
+                    ).model_dump(exclude_none=True, mode="json")
+                ),
+            ),
+            resources=observed,
+        ),
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+
+    release = resource.struct_to_dict(got.desired.resources["gpu-operator"].resource)
+    assert "nvidiaDriverCRD" not in release["spec"]["forProvider"]["values"]["driver"]
+    for key in got.desired.resources:
+        assert "nvlink" not in key
+
+
+def test_cluster_gateway_composes_mtls_with_ca() -> None:
+    """A cluster with an InferenceGateway CA composes its own PKI and serves mTLS."""
+    # It issues its own PKI, republishes the CA without its key, demands a
+    # client certificate on its HTTPS listener, and publishes the CA in status.
+    #
+    # The hostname is a full Service FQDN, so the CA certificate's commonName
+    # overflows the 64-byte X.509 limit and is truncated.
+    hostname = "gateway-test-backend-12345.modelplane-system.svc.cluster.local"
+    req = fnv1.RunFunctionRequest(
+        observed=fnv1.State(
+            composite=fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    v1alpha1.ServingStack(
+                        metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
+                        spec=v1alpha1.Spec(
+                            cloud="Existing",
+                            stack="Standard",
+                            secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
+                            gateway=v1alpha1.Gateway(
+                                hostname=hostname,
+                                # Deliberately out of name order, to prove the
+                                # bundle sorts before concatenating.
+                                clientCAs=[
+                                    v1alpha1.ClientCA(name="fleet-b", certificate="BBB"),
+                                    v1alpha1.ClientCA(name="fleet-a", certificate="AAA"),
+                                ],
+                            ),
+                        ),
+                    ).model_dump(exclude_none=True, mode="json")
+                ),
+            ),
+            # PCs observed, the self-signed Issuer Ready (so trust-manager and
+            # the CA chain proceed), and the CA ConfigMap trust-manager syncs
+            # carrying the certificate back for status.
+            resources=_observed_pcs()
+            | {
+                "gateway-selfsigned-issuer": fnv1.Resource(
+                    resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
+                ),
+                "gateway-ca-configmap": fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        {"status": {"atProvider": {"manifest": {"data": {"ca.crt": "CLUSTERCA"}}}}}
+                    )
+                ),
+            },
+        ),
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+
+    def manifest(key: str) -> dict:
+        return resource.struct_to_dict(got.desired.resources[key].resource)["spec"]["forProvider"]["manifest"]
+
+    ca_cert = manifest("gateway-ca-certificate")
+    assert ca_cert["spec"]["commonName"] == "modelplane cluster CA gateway-test-backend-12345.modelplane-syst"
+    assert len(ca_cert["spec"]["commonName"]) <= 64
+    assert ca_cert["spec"]["isCA"]
+    assert ca_cert["spec"]["issuerRef"]["name"] == "modelplane-selfsigned"
+
+    serving = manifest("gateway-serving-certificate")
+    assert serving["spec"]["dnsNames"] == [hostname]
+    assert serving["spec"]["issuerRef"]["name"] == "modelplane-cluster-ca"
+
+    bundle = manifest("gateway-ca-bundle")
+    assert bundle["apiVersion"] == "trust.cert-manager.io/v1alpha1"
+    assert bundle["spec"]["sources"] == [{"secret": {"name": "modelplane-cluster-ca", "key": "ca.crt"}}]
+
+    # Observed only, never managed: trust-manager owns the ConfigMap.
+    ca_cm = got.desired.resources["gateway-ca-configmap"]
+    assert resource.struct_to_dict(ca_cm.resource)["spec"]["managementPolicies"] == ["Observe"]
+
+    # Every InferenceGateway's CA, sorted by name and concatenated.
+    client_bundle = manifest("gateway-client-ca-bundle")
+    assert client_bundle["data"]["ca.crt"] == "AAA\nBBB\n"
+
+    client_auth = manifest("gateway-client-auth")
+    assert client_auth["kind"] == "ClientTrafficPolicy"
+    assert client_auth["spec"]["targetRefs"][0]["sectionName"] == "https"
+    assert (
+        client_auth["spec"]["tls"]["clientValidation"]["caCertificateRefs"][0]["name"]
+        == "modelplane-inference-gateway-cas"
+    )
+
+    # One HTTPS listener, terminating TLS with the serving certificate.
+    gateway = manifest("gateway")
+    assert gateway["spec"]["listeners"] == [
+        {
+            "name": "https",
+            "protocol": "HTTPS",
+            "port": 443,
+            "hostname": hostname,
+            "tls": {"mode": "Terminate", "certificateRefs": [{"name": "cluster-gateway-serving"}]},
+            "allowedRoutes": {
+                "namespaces": {
+                    "from": "Selector",
+                    "selector": {"matchExpressions": [{"key": "modelplane.ai/namespace", "operator": "Exists"}]},
+                }
+            },
         }
-        first_wave = {k: v for k, v in full.items() if k not in dep_gated}
+    ]
 
-        # Third pass: every rendered resource observed Ready (the gateway
-        # with its address assigned), so everything is marked ready and
-        # the address lands in the XR status.
-        rendered = [k for k in _existing_dynamo_stack() if k != "gateway"]
-        observed_ready = _observed_pcs()
-        for key in rendered:
-            observed_ready[key] = fnv1.Resource(
+    status = resource.struct_to_dict(got.desired.composite.resource)["status"]
+    assert status["gateway"]["caCertificate"] == "CLUSTERCA"
+
+    # Every PKI resource must be tracked for readiness:
+    # compose_gateway_pki marks only the keys it returns, so one composed
+    # but not returned would silently hold the cluster un-Ready. Observe
+    # each Ready and assert it's marked ready, which fails if the key was
+    # dropped from the rendered list. (The self-signed Issuer and
+    # trust-manager are stack components, covered by the golden test.)
+    pki_keys = [
+        "gateway-ca-certificate",
+        "gateway-ca-issuer",
+        "gateway-serving-certificate",
+        "gateway-ca-bundle",
+        "gateway-ca-configmap",
+        "gateway-client-ca-bundle",
+        "gateway-client-auth",
+    ]
+    for key in pki_keys:
+        req.observed.resources[key].CopyFrom(
+            fnv1.Resource(
                 resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
             )
-        observed_ready["gateway"] = fnv1.Resource(
+        )
+    # Preserve the CA ConfigMap's data alongside its Ready condition.
+    req.observed.resources["gateway-ca-configmap"].CopyFrom(
+        fnv1.Resource(
             resource=resource.dict_to_struct(
                 {
                     "status": {
                         "conditions": [{"type": "Ready", "status": "True"}],
-                        "atProvider": {
-                            "manifest": {"status": {"addresses": [{"type": "IPAddress", "value": "203.0.113.7"}]}},
-                        },
-                    },
-                }
-            )
-        )
-        # Every component observed Ready; PCs and Usages are ready on arrival.
-        all_ready = copy.deepcopy(full)
-        for res in all_ready.values():
-            res.ready = fnv1.READY_TRUE
-
-        cases = [
-            Case(
-                name="first pass composes only the provider configs and usages",
-                req=_request("Existing", "Dynamo"),
-                # Everything targeting the remote cluster is gated on the
-                # ProviderConfigs having been observed; Usages reference
-                # nothing remote and compose immediately. The unready
-                # ProviderConfigs keep the composite unready until the
-                # stack actually renders.
-                want=_response(_provider_configs(ready=False) | _EXISTING_DYNAMO_USAGES),
-            ),
-            Case(
-                name="second pass renders the dependency-free wave",
-                req=_request("Existing", "Dynamo", observed=_observed_pcs()),
-                want=_response(first_wave),
-            ),
-            Case(
-                name="all dependencies ready renders the whole stack, marks it ready, and writes the gateway address",
-                req=_request("Existing", "Dynamo", observed=observed_ready),
-                want=_response(all_ready, status={"gateway": {"address": "203.0.113.7"}}),
-            ),
-        ]
-        for case in cases:
-            with self.subTest(case.name):
-                got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
-
-    async def test_identity_secret_type_flows_to_provider_configs(self) -> None:
-        """A non-GCP identity secret's type is stamped verbatim on both
-        ProviderConfigs rather than being forced to GoogleApplicationCredentials,
-        and its own namespace wins over the XR's."""
-        req = fnv1.RunFunctionRequest(
-            observed=fnv1.State(
-                composite=fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        v1alpha1.ServingStack(
-                            metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
-                            spec=v1alpha1.Spec(
-                                cloud="Nebius",
-                                secrets=[
-                                    v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
-                                    v1alpha1.Secret(
-                                        type="NebiusServiceAccountCredentials",
-                                        name="nebius-secret",
-                                        key="credentials.json",
-                                        namespace="other-ns",
-                                    ),
-                                ],
-                                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
-                            ),
-                        ).model_dump(exclude_none=True, mode="json")
-                    ),
-                ),
-            ),
-        )
-        got = await self.runner.RunFunction(req, None)
-        pc = resource.struct_to_dict(got.desired.resources["provider-config-kubernetes"].resource)
-        self.assertEqual("NebiusServiceAccountCredentials", pc["spec"]["identity"]["type"])
-        self.assertEqual("other-ns", pc["spec"]["identity"]["secretRef"]["namespace"])
-        helm_pc = resource.struct_to_dict(got.desired.resources["provider-config-helm"].resource)
-        self.assertEqual("NebiusServiceAccountCredentials", helm_pc["spec"]["identity"]["type"])
-
-    async def test_gpu_pool_nvlink_disable_flows_to_components(self) -> None:
-        """A Civo ServingStack whose spec.gpu flags a pool for NVLink
-        disable composes the gpu-operator release in NVIDIADriver-CRD
-        mode, the kernel module ConfigMap, and a per-pool NVIDIADriver
-        selecting that pool's nodes - and only that pool's."""
-        # The install gate composes a component once its dependencies are
-        # observed Ready; observe the chain up to the per-pool driver.
-        observed = _observed_pcs()
-        for key in (
-            "cert-manager",
-            "node-feature-discovery",
-            "gpu-operator",
-            "nvlink-disable-config-gpu-operator",
-            "nvlink-disable-config-nvidia-kernel-config",
-        ):
-            observed[key] = fnv1.Resource(
-                resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
-            )
-        req = fnv1.RunFunctionRequest(
-            observed=fnv1.State(
-                composite=fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        v1alpha1.ServingStack(
-                            metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
-                            spec=v1alpha1.Spec(
-                                cloud="Civo",
-                                secrets=[
-                                    v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
-                                ],
-                                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
-                                gpu=v1alpha1.Gpu(
-                                    pools=[v1alpha1.Pool(name="h100-pool", disableNvLink=True)],
-                                ),
-                            ),
-                        ).model_dump(exclude_none=True, mode="json")
-                    ),
-                ),
-                resources=observed,
-            ),
-        )
-        got = await self.runner.RunFunction(req, None)
-
-        release = resource.struct_to_dict(got.desired.resources["gpu-operator"].resource)
-        self.assertEqual(
-            {"enabled": True, "deployDefaultCR": True},
-            release["spec"]["forProvider"]["values"]["driver"]["nvidiaDriverCRD"],
-        )
-
-        config = resource.struct_to_dict(got.desired.resources["nvlink-disable-config-nvidia-kernel-config"].resource)
-        self.assertEqual(
-            {"nvidia.conf": "options nvidia NVreg_NvLinkDisable=1"},
-            config["spec"]["forProvider"]["manifest"]["data"],
-        )
-
-        driver = resource.struct_to_dict(got.desired.resources["nvlink-disabled-driver-h100-pool"].resource)
-        manifest = driver["spec"]["forProvider"]["manifest"]
-        self.assertEqual("NVIDIADriver", manifest["kind"])
-        self.assertEqual({"modelplane.ai/pool": "h100-pool"}, manifest["spec"]["nodeSelector"])
-        self.assertEqual({"name": "nvidia-kernel-config"}, manifest["spec"]["kernelModuleConfig"])
-
-        # The derived Usages hold the operator release and the ConfigMap
-        # until the per-pool driver is gone.
-        self.assertIn("usage-gpu-operator-by-nvlink-disabled-driver-h100-pool", got.desired.resources)
-
-    async def test_gpu_pool_without_nvlink_disable_changes_nothing(self) -> None:
-        """A Civo ServingStack whose spec.gpu flags no pool composes the
-        stock component list: ClusterPolicy-managed driver, no NVIDIADriver
-        or kernel module ConfigMap objects."""
-        observed = _observed_pcs()
-        observed["gpu-operator"] = fnv1.Resource(
-            resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
-        )
-        req = fnv1.RunFunctionRequest(
-            observed=fnv1.State(
-                composite=fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        v1alpha1.ServingStack(
-                            metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
-                            spec=v1alpha1.Spec(
-                                cloud="Civo",
-                                secrets=[
-                                    v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig"),
-                                ],
-                                gateway=v1alpha1.Gateway(hostname=_GATEWAY_HOSTNAME),
-                                gpu=v1alpha1.Gpu(
-                                    pools=[v1alpha1.Pool(name="l40s-pool", disableNvLink=False)],
-                                ),
-                            ),
-                        ).model_dump(exclude_none=True, mode="json")
-                    ),
-                ),
-                resources=observed,
-            ),
-        )
-        got = await self.runner.RunFunction(req, None)
-
-        release = resource.struct_to_dict(got.desired.resources["gpu-operator"].resource)
-        self.assertNotIn("nvidiaDriverCRD", release["spec"]["forProvider"]["values"]["driver"])
-        for key in got.desired.resources:
-            self.assertNotIn("nvlink", key)
-
-    async def test_cluster_gateway_composes_mtls_with_ca(self) -> None:
-        """A cluster with an InferenceGateway CA serves mTLS: it issues its own
-        PKI, republishes the CA without its key, demands a client certificate on
-        its HTTPS listener, and publishes the CA in status.
-
-        The hostname is a full Service FQDN, so the CA certificate's commonName
-        overflows the 64-byte X.509 limit and is truncated.
-        """
-        hostname = "gateway-test-backend-12345.modelplane-system.svc.cluster.local"
-        req = fnv1.RunFunctionRequest(
-            observed=fnv1.State(
-                composite=fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        v1alpha1.ServingStack(
-                            metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
-                            spec=v1alpha1.Spec(
-                                cloud="Existing",
-                                stack="Standard",
-                                secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
-                                gateway=v1alpha1.Gateway(
-                                    hostname=hostname,
-                                    # Deliberately out of name order, to prove the
-                                    # bundle sorts before concatenating.
-                                    clientCAs=[
-                                        v1alpha1.ClientCA(name="fleet-b", certificate="BBB"),
-                                        v1alpha1.ClientCA(name="fleet-a", certificate="AAA"),
-                                    ],
-                                ),
-                            ),
-                        ).model_dump(exclude_none=True, mode="json")
-                    ),
-                ),
-                # PCs observed, the self-signed Issuer Ready (so trust-manager and
-                # the CA chain proceed), and the CA ConfigMap trust-manager syncs
-                # carrying the certificate back for status.
-                resources=_observed_pcs()
-                | {
-                    "gateway-selfsigned-issuer": fnv1.Resource(
-                        resource=resource.dict_to_struct(
-                            {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-                        )
-                    ),
-                    "gateway-ca-configmap": fnv1.Resource(
-                        resource=resource.dict_to_struct(
-                            {"status": {"atProvider": {"manifest": {"data": {"ca.crt": "CLUSTERCA"}}}}}
-                        )
-                    ),
-                },
-            ),
-        )
-        got = await self.runner.RunFunction(req, None)
-
-        def manifest(key: str) -> dict:
-            return resource.struct_to_dict(got.desired.resources[key].resource)["spec"]["forProvider"]["manifest"]
-
-        ca_cert = manifest("gateway-ca-certificate")
-        self.assertEqual(
-            "modelplane cluster CA gateway-test-backend-12345.modelplane-syst", ca_cert["spec"]["commonName"]
-        )
-        self.assertLessEqual(len(ca_cert["spec"]["commonName"]), 64)
-        self.assertTrue(ca_cert["spec"]["isCA"])
-        self.assertEqual("modelplane-selfsigned", ca_cert["spec"]["issuerRef"]["name"])
-
-        serving = manifest("gateway-serving-certificate")
-        self.assertEqual([hostname], serving["spec"]["dnsNames"])
-        self.assertEqual("modelplane-cluster-ca", serving["spec"]["issuerRef"]["name"])
-
-        bundle = manifest("gateway-ca-bundle")
-        self.assertEqual("trust.cert-manager.io/v1alpha1", bundle["apiVersion"])
-        self.assertEqual([{"secret": {"name": "modelplane-cluster-ca", "key": "ca.crt"}}], bundle["spec"]["sources"])
-
-        # Observed only, never managed: trust-manager owns the ConfigMap.
-        ca_cm = got.desired.resources["gateway-ca-configmap"]
-        self.assertEqual(["Observe"], resource.struct_to_dict(ca_cm.resource)["spec"]["managementPolicies"])
-
-        # Every InferenceGateway's CA, sorted by name and concatenated.
-        client_bundle = manifest("gateway-client-ca-bundle")
-        self.assertEqual("AAA\nBBB\n", client_bundle["data"]["ca.crt"])
-
-        client_auth = manifest("gateway-client-auth")
-        self.assertEqual("ClientTrafficPolicy", client_auth["kind"])
-        self.assertEqual("https", client_auth["spec"]["targetRefs"][0]["sectionName"])
-        self.assertEqual(
-            "modelplane-inference-gateway-cas",
-            client_auth["spec"]["tls"]["clientValidation"]["caCertificateRefs"][0]["name"],
-        )
-
-        # One HTTPS listener, terminating TLS with the serving certificate.
-        gateway = manifest("gateway")
-        self.assertEqual(
-            [
-                {
-                    "name": "https",
-                    "protocol": "HTTPS",
-                    "port": 443,
-                    "hostname": hostname,
-                    "tls": {"mode": "Terminate", "certificateRefs": [{"name": "cluster-gateway-serving"}]},
-                    "allowedRoutes": {
-                        "namespaces": {
-                            "from": "Selector",
-                            "selector": {
-                                "matchExpressions": [{"key": "modelplane.ai/namespace", "operator": "Exists"}]
-                            },
-                        }
-                    },
-                }
-            ],
-            gateway["spec"]["listeners"],
-        )
-
-        status = resource.struct_to_dict(got.desired.composite.resource)["status"]
-        self.assertEqual("CLUSTERCA", status["gateway"]["caCertificate"])
-
-        # Every PKI resource must be tracked for readiness:
-        # compose_gateway_pki marks only the keys it returns, so one composed
-        # but not returned would silently hold the cluster un-Ready. Observe
-        # each Ready and assert it's marked ready, which fails if the key was
-        # dropped from the rendered list. (The self-signed Issuer and
-        # trust-manager are stack components, covered by the golden test.)
-        pki_keys = [
-            "gateway-ca-certificate",
-            "gateway-ca-issuer",
-            "gateway-serving-certificate",
-            "gateway-ca-bundle",
-            "gateway-ca-configmap",
-            "gateway-client-ca-bundle",
-            "gateway-client-auth",
-        ]
-        for key in pki_keys:
-            req.observed.resources[key].CopyFrom(
-                fnv1.Resource(
-                    resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
-                )
-            )
-        # Preserve the CA ConfigMap's data alongside its Ready condition.
-        req.observed.resources["gateway-ca-configmap"].CopyFrom(
-            fnv1.Resource(
-                resource=resource.dict_to_struct(
-                    {
-                        "status": {
-                            "conditions": [{"type": "Ready", "status": "True"}],
-                            "atProvider": {"manifest": {"data": {"ca.crt": "CLUSTERCA"}}},
-                        }
+                        "atProvider": {"manifest": {"data": {"ca.crt": "CLUSTERCA"}}},
                     }
-                )
+                }
             )
         )
-        got = await self.runner.RunFunction(req, None)
-        for key in pki_keys:
-            self.assertEqual(fnv1.READY_TRUE, got.desired.resources[key].ready, f"{key} not marked ready")
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    for key in pki_keys:
+        assert got.desired.resources[key].ready == fnv1.READY_TRUE, f"{key} not marked ready"
 
-    async def test_cluster_gateway_without_ca_serves_nothing(self) -> None:
-        """A cluster with no InferenceGateway CA withholds the Gateway entirely
-        rather than serving the engines unauthenticated, and warns."""
-        req = fnv1.RunFunctionRequest(
-            observed=fnv1.State(
-                composite=fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        v1alpha1.ServingStack(
-                            metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
-                            spec=v1alpha1.Spec(
-                                cloud="Existing",
-                                stack="Standard",
-                                secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
-                                gateway=v1alpha1.Gateway(hostname="gw.clusters.example.com"),
-                            ),
-                        ).model_dump(exclude_none=True, mode="json")
-                    ),
+
+def test_cluster_gateway_without_ca_serves_nothing() -> None:
+    """A cluster with no InferenceGateway CA withholds its Gateway, and warns."""
+    # Withholding the Gateway entirely, rather than serving the engines
+    # unauthenticated.
+    req = fnv1.RunFunctionRequest(
+        observed=fnv1.State(
+            composite=fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    v1alpha1.ServingStack(
+                        metadata=metav1.ObjectMeta(name="test-backend", namespace="test-ns"),
+                        spec=v1alpha1.Spec(
+                            cloud="Existing",
+                            stack="Standard",
+                            secrets=[v1alpha1.Secret(type="Kubeconfig", name="kube-secret", key="kubeconfig")],
+                            gateway=v1alpha1.Gateway(hostname="gw.clusters.example.com"),
+                        ),
+                    ).model_dump(exclude_none=True, mode="json")
                 ),
-                resources=_observed_pcs(),
+            ),
+            resources=_observed_pcs(),
+        ),
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    # The GatewayClass and the cluster's own PKI are composed, so the CA is
+    # ready to publish when the first InferenceGateway's CA arrives. The
+    # Gateway, the client CA bundle and the policy demanding a client
+    # certificate aren't, and nor is the Usage protecting the Gateway.
+    gateway_keys = {k for k in got.desired.resources if k.startswith(("gateway", "usage-gateway"))}
+    assert gateway_keys == {
+        "gateway-class",
+        "gateway-ca-certificate",
+        "gateway-ca-issuer",
+        "gateway-serving-certificate",
+        "gateway-ca-bundle",
+        "gateway-ca-configmap",
+        "gateway-namespace",
+        "usage-gateway-namespace-by-gateway-proxy",
+        "usage-gateway-namespace-by-gateway-selfsigned-issuer",
+        "usage-gateway-selfsigned-issuer-by-trust-manager",
+    }
+    assert list(got.results) == [
+        fnv1.Result(
+            severity=fnv1.SEVERITY_WARNING,
+            message=(
+                "Gateway gw.clusters.example.com not served: no InferenceGateway has published a client "
+                "CA for this cluster to trust, and serving without one would accept unauthenticated callers"
             ),
         )
-        got = await self.runner.RunFunction(req, None)
-        # The GatewayClass and the cluster's own PKI are composed, so the CA is
-        # ready to publish when the first InferenceGateway's CA arrives. The
-        # Gateway, the client CA bundle and the policy demanding a client
-        # certificate aren't, and nor is the Usage protecting the Gateway.
-        gateway_keys = {k for k in got.desired.resources if k.startswith(("gateway", "usage-gateway"))}
-        self.assertEqual(
-            {
-                "gateway-class",
-                "gateway-ca-certificate",
-                "gateway-ca-issuer",
-                "gateway-serving-certificate",
-                "gateway-ca-bundle",
-                "gateway-ca-configmap",
-                "gateway-namespace",
-                "usage-gateway-namespace-by-gateway-proxy",
-                "usage-gateway-namespace-by-gateway-selfsigned-issuer",
-                "usage-gateway-selfsigned-issuer-by-trust-manager",
-            },
-            gateway_keys,
-        )
-        self.assertEqual(
-            [
-                fnv1.Result(
-                    severity=fnv1.SEVERITY_WARNING,
-                    message=(
-                        "Gateway gw.clusters.example.com not served: no InferenceGateway has published a client "
-                        "CA for this cluster to trust, and serving without one would accept unauthenticated callers"
-                    ),
-                )
-            ],
-            list(got.results),
-        )
+    ]
 
 
 # The composed-resource key a component renders under is its identity:
@@ -1465,242 +1447,223 @@ _INVENTORY = {
 }
 
 
-class TestKeyInventory(unittest.IsolatedAsyncioTestCase):
-    maxDiff = None
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
-
-    async def test_composed_resource_keys(self) -> None:
-        for cloud, cloud_keys in _INVENTORY.items():
-            for stack, stack_keys in (("Standard", _STANDARD), ("Dynamo", _DYNAMO)):
-                with self.subTest(cloud=cloud, stack=stack):
-                    expected = _ALWAYS | _COMMON | cloud_keys | stack_keys
-                    # Observe every expected key Ready so the depends_on
-                    # install gate opens and the full stack renders; a
-                    # key the function doesn't render still fails the
-                    # comparison.
-                    observed = _observed_pcs()
-                    for key in expected:
-                        observed[key] = fnv1.Resource(
-                            resource=resource.dict_to_struct(
-                                {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-                            )
-                        )
-                    got = await self.runner.RunFunction(_request(cloud, stack, observed=observed), None)
-                    self.assertEqual(expected, set(got.desired.resources.keys()))
+@pytest.mark.parametrize(
+    ("stack", "stack_keys"), [("Standard", _STANDARD), ("Dynamo", _DYNAMO)], ids=["Standard", "Dynamo"]
+)
+@pytest.mark.parametrize(("cloud", "cloud_keys"), list(_INVENTORY.items()), ids=list(_INVENTORY))
+def test_composed_resource_keys(cloud: str, cloud_keys: frozenset[str], stack: str, stack_keys: frozenset[str]) -> None:
+    """Every cloud and stack composes exactly its inventoried resource keys."""
+    expected = _ALWAYS | _COMMON | cloud_keys | stack_keys
+    # Observe every expected key Ready so the depends_on
+    # install gate opens and the full stack renders; a
+    # key the function doesn't render still fails the
+    # comparison.
+    observed = _observed_pcs()
+    for key in expected:
+        observed[key] = fnv1.Resource(
+            resource=resource.dict_to_struct({"status": {"conditions": [{"type": "Ready", "status": "True"}]}})
+        )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(_request(cloud, stack, observed=observed), None))
+    assert set(got.desired.resources.keys()) == expected
 
 
-class TestCollectorReadiness(unittest.IsolatedAsyncioTestCase):
-    """The collector is composed, but the stack never waits on it."""
+def _with_destination(req: fnv1.RunFunctionRequest, *, secret: str | None = None) -> fnv1.RunFunctionRequest:
+    sink: dict = {"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}
+    if secret:
+        sink |= {"secretRef": {"name": secret}, "auth": {"bearerTokenKey": "token"}}
+    req.required_resources["destinations"].items.append(
+        fnv1.Resource(
+            resource=resource.dict_to_struct(
+                {
+                    "apiVersion": "modelplane.ai/v1alpha1",
+                    "kind": "TelemetryDestination",
+                    "metadata": {"name": "acme"},
+                    "spec": {"sinks": [sink]},
+                }
+            )
+        )
+    )
+    req.required_resources["mappings"].items.extend([])
+    if secret:
+        req.required_resources["collector-secret-primary"].items.append(
+            fnv1.Resource(
+                resource=resource.dict_to_struct(
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Secret",
+                        "metadata": {"name": secret, "namespace": "modelplane-system"},
+                        "data": {"token": "c2hoaGg="},
+                    }
+                )
+            )
+        )
+    return req
 
-    maxDiff = None
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
+def test_the_collector_does_not_gate_the_stack() -> None:
+    """A collector nothing has observed yet is still Ready.
 
-    @staticmethod
-    def _with_destination(req: fnv1.RunFunctionRequest, *, secret: str | None = None) -> fnv1.RunFunctionRequest:
-        sink: dict = {"name": "primary", "type": "otlphttp", "endpoint": "https://otel.acme.example"}
-        if secret:
-            sink |= {"secretRef": {"name": secret}, "auth": {"bearerTokenKey": "token"}}
+    Everything else the stack composes is Ready only once its observed
+    Ready condition says so, because the fleet cannot serve without it.
+    The collector only watches, so gating on it would put placing a
+    replica behind exporting a metric: one destination pointing at an
+    endpoint that has gone away would take every InferenceCluster in the
+    fleet out of Ready and stop the scheduler.
+    """
+    req = _with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    collector_keys = [k for k in got.desired.resources if k == "collector" or k.startswith("collector-")]
+    # The Deployment, which is the one with a readiness CEL of its own and
+    # so the one that would have gated the stack.
+    assert "collector" in collector_keys
+    for key in collector_keys:
+        assert key not in req.observed.resources, key
+        assert got.desired.resources[key].ready == fnv1.READY_TRUE, key
+
+
+def test_the_credential_reaches_the_cluster_that_mounts_it() -> None:
+    """The operator writes one Secret; the collector mounts it elsewhere.
+
+    A TelemetryDestination is cluster-scoped on the control plane and the
+    collector runs on every workload cluster in the fleet. Resolving the
+    Secret and stopping there leaves the Deployment mounting a name
+    nothing out there creates, so the pod never starts and the fleet
+    exports nothing - the failure every destination with a credential
+    would hit, which is every destination that reaches a real backend.
+    """
+    req = _with_destination(_request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials")
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    assert "collector-secret-primary" in got.desired.resources
+    composed = resource.struct_to_dict(got.desired.resources["collector-secret-primary"].resource)
+    manifest = composed["spec"]["forProvider"]["manifest"]
+    assert manifest["kind"] == "Secret"
+    assert manifest["metadata"]["name"] == "telemetry-credentials"
+    assert manifest["metadata"]["namespace"] == "modelplane-system"
+    # Copied verbatim: re-encoding would corrupt a credential that is not
+    # text, and the mount reads the same key the sink's auth names.
+    assert manifest["data"] == {"token": "c2hoaGg="}
+
+
+def test_a_destination_asks_for_its_credential_in_one_namespace() -> None:
+    """Unqualified, the requirement matches a Secret of that name anywhere."""
+    req = _with_destination(_request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials")
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    selector = got.requirements.resources["collector-secret-primary"]
+    assert selector.match_name == "telemetry-credentials"
+    assert selector.namespace == "modelplane-system"
+
+
+def test_every_destination_contributes_its_sinks() -> None:
+    """A second backend is a second object, not an edit to a singleton.
+
+    Picking one destination and warning about the rest means a team
+    adding an export has to edit an object another team owns, and gets
+    silence if they create their own instead.
+    """
+    req = _request("GKE", "Standard", observed=_observed_pcs())
+    for name, sink in (
+        ("acme", {"name": "vendor", "type": "otlphttp", "endpoint": "https://otel.vendor.example"}),
+        ("zeta", {"name": "prom", "type": "prometheus_remote_write", "endpoint": "https://p.example/w"}),
+    ):
         req.required_resources["destinations"].items.append(
             fnv1.Resource(
                 resource=resource.dict_to_struct(
                     {
                         "apiVersion": "modelplane.ai/v1alpha1",
                         "kind": "TelemetryDestination",
-                        "metadata": {"name": "acme"},
+                        "metadata": {"name": name},
                         "spec": {"sinks": [sink]},
                     }
                 )
             )
         )
-        req.required_resources["mappings"].items.extend([])
-        if secret:
-            req.required_resources["collector-secret-primary"].items.append(
-                fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        {
-                            "apiVersion": "v1",
-                            "kind": "Secret",
-                            "metadata": {"name": secret, "namespace": "modelplane-system"},
-                            "data": {"token": "c2hoaGg="},
-                        }
-                    )
-                )
-            )
-        return req
+    req.required_resources["mappings"].items.extend([])
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    config = yaml.safe_load(
+        resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"]["manifest"][
+            "data"
+        ]["collector.yaml"]
+    )
+    assert sorted(config["exporters"]) == ["otlphttp/vendor", "prometheus_remote_write/prom"]
+    assert sorted(config["service"]["pipelines"]["metrics"]["exporters"]) == [
+        "otlphttp/vendor",
+        "prometheus_remote_write/prom",
+    ]
 
-    async def test_the_collector_does_not_gate_the_stack(self) -> None:
-        """A collector nothing has observed yet is still Ready.
 
-        Everything else the stack composes is Ready only once its observed
-        Ready condition says so, because the fleet cannot serve without it.
-        The collector only watches, so gating on it would put placing a
-        replica behind exporting a metric: one destination pointing at an
-        endpoint that has gone away would take every InferenceCluster in the
-        fleet out of Ready and stop the scheduler.
-        """
-        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
-        got = await self.runner.RunFunction(req, None)
-        collector_keys = [k for k in got.desired.resources if k == "collector" or k.startswith("collector-")]
-        # The Deployment, which is the one with a readiness CEL of its own and
-        # so the one that would have gated the stack.
-        self.assertIn("collector", collector_keys)
-        for key in collector_keys:
-            with self.subTest(key=key):
-                self.assertNotIn(key, req.observed.resources)
-                self.assertEqual(got.desired.resources[key].ready, fnv1.READY_TRUE)
+def test_two_destinations_cannot_name_one_exporter() -> None:
+    """A sink names the collector's exporter instance.
 
-    async def test_the_credential_reaches_the_cluster_that_mounts_it(self) -> None:
-        """The operator writes one Secret; the collector mounts it elsewhere.
-
-        A TelemetryDestination is cluster-scoped on the control plane and the
-        collector runs on every workload cluster in the fleet. Resolving the
-        Secret and stopping there leaves the Deployment mounting a name
-        nothing out there creates, so the pod never starts and the fleet
-        exports nothing - the failure every destination with a credential
-        would hit, which is every destination that reaches a real backend.
-        """
-        req = self._with_destination(
-            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
-        )
-        got = await self.runner.RunFunction(req, None)
-        self.assertIn("collector-secret-primary", got.desired.resources)
-        composed = resource.struct_to_dict(got.desired.resources["collector-secret-primary"].resource)
-        manifest = composed["spec"]["forProvider"]["manifest"]
-        self.assertEqual(manifest["kind"], "Secret")
-        self.assertEqual(manifest["metadata"]["name"], "telemetry-credentials")
-        self.assertEqual(manifest["metadata"]["namespace"], "modelplane-system")
-        # Copied verbatim: re-encoding would corrupt a credential that is not
-        # text, and the mount reads the same key the sink's auth names.
-        self.assertEqual(manifest["data"], {"token": "c2hoaGg="})
-
-    async def test_a_destination_asks_for_its_credential_in_one_namespace(self) -> None:
-        """Unqualified, the requirement matches a Secret of that name anywhere."""
-        req = self._with_destination(
-            _request("GKE", "Standard", observed=_observed_pcs()), secret="telemetry-credentials"
-        )
-        got = await self.runner.RunFunction(req, None)
-        selector = got.requirements.resources["collector-secret-primary"]
-        self.assertEqual(selector.match_name, "telemetry-credentials")
-        self.assertEqual(selector.namespace, "modelplane-system")
-
-    async def test_every_destination_contributes_its_sinks(self) -> None:
-        """A second backend is a second object, not an edit to a singleton.
-
-        Picking one destination and warning about the rest means a team
-        adding an export has to edit an object another team owns, and gets
-        silence if they create their own instead.
-        """
-        req = _request("GKE", "Standard", observed=_observed_pcs())
-        for name, sink in (
-            ("acme", {"name": "vendor", "type": "otlphttp", "endpoint": "https://otel.vendor.example"}),
-            ("zeta", {"name": "prom", "type": "prometheus_remote_write", "endpoint": "https://p.example/w"}),
-        ):
-            req.required_resources["destinations"].items.append(
-                fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        {
-                            "apiVersion": "modelplane.ai/v1alpha1",
-                            "kind": "TelemetryDestination",
-                            "metadata": {"name": name},
-                            "spec": {"sinks": [sink]},
-                        }
-                    )
-                )
-            )
-        req.required_resources["mappings"].items.extend([])
-        got = await self.runner.RunFunction(req, None)
-        config = yaml.safe_load(
-            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
-                "manifest"
-            ]["data"]["collector.yaml"]
-        )
-        self.assertEqual(
-            sorted(config["exporters"]),
-            ["otlphttp/vendor", "prometheus_remote_write/prom"],
-        )
-        self.assertEqual(
-            sorted(config["service"]["pipelines"]["metrics"]["exporters"]),
-            ["otlphttp/vendor", "prometheus_remote_write/prom"],
-        )
-
-    async def test_two_destinations_cannot_name_one_exporter(self) -> None:
-        """A sink names the collector's exporter instance.
-
-        Two of them under one name is one exporter with two meanings. The
-        destination sorting first keeps it and the other is dropped with a
-        warning, rather than failing the whole fleet's telemetry over a name.
-        """
-        req = _request("GKE", "Standard", observed=_observed_pcs())
-        for name, endpoint in (("acme", "https://a.example"), ("zeta", "https://z.example")):
-            req.required_resources["destinations"].items.append(
-                fnv1.Resource(
-                    resource=resource.dict_to_struct(
-                        {
-                            "apiVersion": "modelplane.ai/v1alpha1",
-                            "kind": "TelemetryDestination",
-                            "metadata": {"name": name},
-                            "spec": {"sinks": [{"name": "primary", "type": "otlphttp", "endpoint": endpoint}]},
-                        }
-                    )
-                )
-            )
-        req.required_resources["mappings"].items.extend([])
-        got = await self.runner.RunFunction(req, None)
-        config = yaml.safe_load(
-            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
-                "manifest"
-            ]["data"]["collector.yaml"]
-        )
-        self.assertEqual(list(config["exporters"]), ["otlphttp/primary"])
-        self.assertEqual(config["exporters"]["otlphttp/primary"]["endpoint"], "https://a.example")
-        self.assertTrue([r for r in got.results if "zeta" in r.message])
-
-    async def test_a_stale_mapping_does_not_break_the_stack(self) -> None:
-        """A CRD validates on write, not on what it already stored.
-
-        A MetricMapping written against an older schema comes back on read
-        exactly as it was stored, so a value the enum no longer carries
-        reaches the parser. Parsing it raises, and raising fails the whole
-        pipeline step - so the serving stack composes nothing and the fleet
-        stops placing replicas, because one telemetry object is out of date.
-        Seen on a real cluster, where a mapping predating a required field
-        did it.
-        """
-        req = self._with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
-        req.required_resources["mappings"].items.append(
+    Two of them under one name is one exporter with two meanings. The
+    destination sorting first keeps it and the other is dropped with a
+    warning, rather than failing the whole fleet's telemetry over a name.
+    """
+    req = _request("GKE", "Standard", observed=_observed_pcs())
+    for name, endpoint in (("acme", "https://a.example"), ("zeta", "https://z.example")):
+        req.required_resources["destinations"].items.append(
             fnv1.Resource(
                 resource=resource.dict_to_struct(
                     {
                         "apiVersion": "modelplane.ai/v1alpha1",
-                        "kind": "MetricMapping",
-                        "metadata": {"name": "stale"},
-                        # A unit the enum no longer carries.
-                        "spec": {
-                            "metrics": [
-                                {
-                                    "from": "old_engine_transfer",
-                                    "to": "modelplane_request_kv_transfer_seconds",
-                                    "fromUnit": "Centiseconds",
-                                }
-                            ]
-                        },
+                        "kind": "TelemetryDestination",
+                        "metadata": {"name": name},
+                        "spec": {"sinks": [{"name": "primary", "type": "otlphttp", "endpoint": endpoint}]},
                     }
                 )
             )
         )
-        got = await self.runner.RunFunction(req, None)
-        # The stack still composes, and says what it dropped.
-        self.assertIn("collector", got.desired.resources)
-        self.assertTrue([r for r in got.results if "stale" in r.message])
-        config = yaml.safe_load(
-            resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"][
-                "manifest"
-            ]["data"]["collector.yaml"]
+    req.required_resources["mappings"].items.extend([])
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    config = yaml.safe_load(
+        resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"]["manifest"][
+            "data"
+        ]["collector.yaml"]
+    )
+    assert list(config["exporters"]) == ["otlphttp/primary"]
+    assert config["exporters"]["otlphttp/primary"]["endpoint"] == "https://a.example"
+    assert [r for r in got.results if "zeta" in r.message]
+
+
+def test_a_stale_mapping_does_not_break_the_stack() -> None:
+    """A CRD validates on write, not on what it already stored.
+
+    A MetricMapping written against an older schema comes back on read
+    exactly as it was stored, so a value the enum no longer carries
+    reaches the parser. Parsing it raises, and raising fails the whole
+    pipeline step - so the serving stack composes nothing and the fleet
+    stops placing replicas, because one telemetry object is out of date.
+    Seen on a real cluster, where a mapping predating a required field
+    did it.
+    """
+    req = _with_destination(_request("GKE", "Standard", observed=_observed_pcs()))
+    req.required_resources["mappings"].items.append(
+        fnv1.Resource(
+            resource=resource.dict_to_struct(
+                {
+                    "apiVersion": "modelplane.ai/v1alpha1",
+                    "kind": "MetricMapping",
+                    "metadata": {"name": "stale"},
+                    # A unit the enum no longer carries.
+                    "spec": {
+                        "metrics": [
+                            {
+                                "from": "old_engine_transfer",
+                                "to": "modelplane_request_kv_transfer_seconds",
+                                "fromUnit": "Centiseconds",
+                            }
+                        ]
+                    },
+                }
+            )
         )
-        self.assertNotIn("old_engine_waiting", yaml.safe_dump(config))
+    )
+    got = asyncio.run(fn.FunctionRunner().RunFunction(req, None))
+    # The stack still composes, and says what it dropped.
+    assert "collector" in got.desired.resources
+    assert [r for r in got.results if "stale" in r.message]
+    config = yaml.safe_load(
+        resource.struct_to_dict(got.desired.resources["collector-config"].resource)["spec"]["forProvider"]["manifest"][
+            "data"
+        ]["collector.yaml"]
+    )
+    assert "old_engine_waiting" not in yaml.safe_dump(config)

@@ -14,15 +14,17 @@
 
 """Tests for the compose-civo-cluster function."""
 
+import asyncio
 import dataclasses
-import unittest
+import json
 from typing import Any
 
-from crossplane.function import logging, resource
+import pytest
+from crossplane.function import resource
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from function import fn
 from google.protobuf import duration_pb2 as durationpb
-from google.protobuf import json_format
+from google.protobuf import json_format, message
 from google.protobuf import struct_pb2 as structpb
 from models.ai.modelplane.infrastructure.civocluster import v1alpha1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
@@ -35,10 +37,6 @@ class Case:
     name: str
     req: fnv1.RunFunctionRequest
     want: fnv1.RunFunctionResponse
-
-
-def setUpModule() -> None:
-    logging.configure(level=logging.Level.DISABLED)
 
 
 # Name of the cluster's connection secret. Derived like the function derives
@@ -309,306 +307,298 @@ _GPU_POOL_GOLDEN = _node_pool(
 )
 
 
-class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
-    """Tests for FunctionRunner.RunFunction."""
-
-    maxDiff = None
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
-
-    async def test_compose(self) -> None:
-        """The function composes Civo cluster infrastructure."""
-        cases = [
-            Case(
-                name="network, firewall and cluster composed first; node pools withheld until cluster Ready",
-                req=_req([_GPU_POOL]),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                            ),
-                        },
+COMPOSE_CASES = [
+    Case(
+        name="network, firewall and cluster composed first; node pools withheld until cluster Ready",
+        req=_req([_GPU_POOL]),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(_network()),
                     ),
-                    context=structpb.Struct(),
-                ),
-            ),
-            Case(
-                name="node pools and provider config composed once cluster is Ready; autoscaler has no groups until pool IDs observed",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
-                    },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(_firewall()),
                     ),
-                    context=structpb.Struct(),
-                ),
-            ),
-            Case(
-                name="autoscaler release composed from observed pool IDs",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
-                        "node-pool-gpu-l40s": _observed_ready(_GPU_POOL_GOLDEN, external_name=_GPU_POOL_ID),
-                    },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _autoscaler(
-                                        [{"name": _GPU_POOL_ID, "minSize": 1, "maxSize": 4}],
-                                    ),
-                                ),
-                            ),
-                        },
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(_cluster()),
                     ),
-                    context=structpb.Struct(),
-                ),
+                },
             ),
-            Case(
-                name="dependents kept when the cluster Ready condition transiently regresses",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_unready(_cluster(), external_name=_CLUSTER_ID),
-                        "provider-config-helm": _observed_ready(_provider_config_helm()),
-                    },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="node pools and provider config composed once cluster is Ready; autoscaler has no groups until pool IDs observed",
+        req=_req(
+            [_GPU_POOL],
+            observed_resources={
+                "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(_network()),
                     ),
-                    context=structpb.Struct(),
-                ),
-            ),
-            Case(
-                name="fixed-size GPU pool composes the autoscaler release with no node groups",
-                req=_req(
-                    [
-                        v1alpha1.NodePool(
-                            name="gpu-l40s",
-                            role="GPU",
-                            size="an.g1.l40s.kube.x1",
-                            nodeCount=2,
-                            gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
-                        ),
-                    ],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
-                    },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _node_pool(
-                                        label="gpu-l40s",
-                                        size="an.g1.l40s.kube.x1",
-                                        node_count=2,
-                                        labels={
-                                            "modelplane.ai/pool": "gpu-l40s",
-                                            "modelplane.ai/gpu": "nvidia-l40s",
-                                        },
-                                        taint=_GPU_TAINT,
-                                    ),
-                                ),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(_firewall()),
                     ),
-                    context=structpb.Struct(),
-                ),
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(_cluster()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "node-pool-gpu-l40s": fnv1.Resource(
+                        resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
+                    ),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(_provider_config_helm()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "release-cluster-autoscaler": fnv1.Resource(
+                        resource=resource.dict_to_struct(_autoscaler([])),
+                    ),
+                },
             ),
-            Case(
-                name="System pool carries no taint; credentials override propagates",
-                req=fnv1.RunFunctionRequest(
-                    observed=fnv1.State(
-                        composite=fnv1.Resource(
-                            resource=resource.dict_to_struct(
-                                v1alpha1.CivoCluster(
-                                    metadata=metav1.ObjectMeta(
-                                        name="test-cluster",
-                                        namespace="modelplane-system",
-                                    ),
-                                    spec=v1alpha1.Spec(
-                                        region="LON1",
-                                        credentials=v1alpha1.Credentials(
-                                            type="ProviderConfig",
-                                            name="team-a",
-                                        ),
-                                        nodePools=[
-                                            v1alpha1.NodePool(
-                                                name="workers",
-                                                role="System",
-                                                size="g4p.kube.small",
-                                                nodeCount=2,
-                                            ),
-                                        ],
-                                    ),
-                                ).model_dump(exclude_none=True, mode="json"),
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="autoscaler release composed from observed pool IDs",
+        req=_req(
+            [_GPU_POOL],
+            observed_resources={
+                "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
+                "node-pool-gpu-l40s": _observed_ready(_GPU_POOL_GOLDEN, external_name=_GPU_POOL_ID),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(_network()),
+                    ),
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(_firewall()),
+                    ),
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(_cluster()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "node-pool-gpu-l40s": fnv1.Resource(
+                        resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(_provider_config_helm()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "release-cluster-autoscaler": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _autoscaler(
+                                [{"name": _GPU_POOL_ID, "minSize": 1, "maxSize": 4}],
                             ),
                         ),
-                        resources={
-                            "cluster": _observed_ready(
-                                _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
-                                external_name=_CLUSTER_ID,
-                            ),
-                        },
                     ),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="dependents kept when the cluster Ready condition transiently regresses",
+        req=_req(
+            [_GPU_POOL],
+            observed_resources={
+                "cluster": _observed_unready(_cluster(), external_name=_CLUSTER_ID),
+                "provider-config-helm": _observed_ready(_provider_config_helm()),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(_network()),
+                    ),
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(_firewall()),
+                    ),
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(_cluster()),
+                    ),
+                    "node-pool-gpu-l40s": fnv1.Resource(
+                        resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
+                    ),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(_provider_config_helm()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "release-cluster-autoscaler": fnv1.Resource(
+                        resource=resource.dict_to_struct(_autoscaler([])),
+                    ),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="fixed-size GPU pool composes the autoscaler release with no node groups",
+        req=_req(
+            [
+                v1alpha1.NodePool(
+                    name="gpu-l40s",
+                    role="GPU",
+                    size="an.g1.l40s.kube.x1",
+                    nodeCount=2,
+                    gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
                 ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _network(cred_kind="ProviderConfig", cred_name="team-a"),
-                                ),
+            ],
+            observed_resources={
+                "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(_network()),
+                    ),
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(_firewall()),
+                    ),
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(_cluster()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "node-pool-gpu-l40s": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _node_pool(
+                                label="gpu-l40s",
+                                size="an.g1.l40s.kube.x1",
+                                node_count=2,
+                                labels={
+                                    "modelplane.ai/pool": "gpu-l40s",
+                                    "modelplane.ai/gpu": "nvidia-l40s",
+                                },
+                                taint=_GPU_TAINT,
                             ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _firewall(cred_kind="ProviderConfig", cred_name="team-a"),
-                                ),
+                        ),
+                    ),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(_provider_config_helm()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "release-cluster-autoscaler": fnv1.Resource(
+                        resource=resource.dict_to_struct(_autoscaler([])),
+                    ),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="System pool carries no taint; credentials override propagates",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=fnv1.Resource(
+                    resource=resource.dict_to_struct(
+                        v1alpha1.CivoCluster(
+                            metadata=metav1.ObjectMeta(
+                                name="test-cluster",
+                                namespace="modelplane-system",
                             ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
+                            spec=v1alpha1.Spec(
+                                region="LON1",
+                                credentials=v1alpha1.Credentials(
+                                    type="ProviderConfig",
+                                    name="team-a",
                                 ),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-workers": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _node_pool(
-                                        label="workers",
+                                nodePools=[
+                                    v1alpha1.NodePool(
+                                        name="workers",
+                                        role="System",
                                         size="g4p.kube.small",
-                                        node_count=2,
-                                        labels={"modelplane.ai/pool": "workers"},
-                                        cred_kind="ProviderConfig",
-                                        cred_name="team-a",
+                                        nodeCount=2,
                                     ),
-                                ),
+                                ],
                             ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
+                        ).model_dump(exclude_none=True, mode="json"),
                     ),
-                    context=structpb.Struct(),
                 ),
+                resources={
+                    "cluster": _observed_ready(
+                        _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
+                        external_name=_CLUSTER_ID,
+                    ),
+                },
             ),
-        ]
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
+                resources={
+                    "network": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _network(cred_kind="ProviderConfig", cred_name="team-a"),
+                        ),
+                    ),
+                    "firewall": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _firewall(cred_kind="ProviderConfig", cred_name="team-a"),
+                        ),
+                    ),
+                    "cluster": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
+                        ),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "node-pool-workers": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            _node_pool(
+                                label="workers",
+                                size="g4p.kube.small",
+                                node_count=2,
+                                labels={"modelplane.ai/pool": "workers"},
+                                cred_kind="ProviderConfig",
+                                cred_name="team-a",
+                            ),
+                        ),
+                    ),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(_provider_config_helm()),
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "release-cluster-autoscaler": fnv1.Resource(
+                        resource=resource.dict_to_struct(_autoscaler([])),
+                    ),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+]
 
-        for case in cases:
-            with self.subTest(case.name):
-                got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
+
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
+
+
+@pytest.mark.parametrize("case", COMPOSE_CASES, ids=lambda case: case.name)
+def test_compose(case: Case) -> None:
+    """The function composes Civo cluster infrastructure."""
+    got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
+    assert _to_dict(got) == _to_dict(case.want)
