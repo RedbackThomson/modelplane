@@ -114,6 +114,29 @@ in
         touch $out/.function-test-style-checked
       '';
 
+  # Type-check the end-to-end tests with ty, against the packages the e2e app
+  # runs them with (see apps.nix).
+  ty-e2e =
+    let
+      venv = pythonSet.mkVirtualEnv "e2e-ty-env" {
+        pytest = [ ];
+        kubernetes = [ ];
+        crossplane-models = [ ];
+        pydantic = [ ];
+      };
+    in
+    pkgs.runCommand "modelplane-ty-e2e"
+      {
+        nativeBuildInputs = [ pkgs.unstable.ty ];
+      }
+      ''
+        cp -r ${self}/e2e e2e
+        cp ${self}/pyproject.toml pyproject.toml
+        ty check e2e --python ${venv}
+        mkdir -p $out
+        touch $out/.ty-passed
+      '';
+
   python =
     pkgs.runCommand "modelplane-python-checks"
       {
@@ -123,8 +146,8 @@ in
         cp -r ${self} src
         chmod -R u+w src
         cd src
-        ruff format --check functions/ docs/utils/validate/ hack/
-        ruff check functions/ docs/utils/validate/ hack/
+        ruff format --check functions/ docs/utils/validate/ hack/ e2e/
+        ruff check functions/ docs/utils/validate/ hack/ e2e/
         mkdir -p $out
         touch $out/.python-checks-passed
       '';
@@ -159,11 +182,11 @@ in
 
   # Fail if any hand-written source file is missing its Apache 2.0 license
   # header. Scoped to the files we author: the composition functions, the docs
-  # manifest validator, and the scripts in hack/. Generated models under
-  # schemas/python carry their own codegen banner, and config (*.toml) and
-  # vendored upstream CRDs (*.yaml) are excluded. addlicense -check only reads,
-  # so it runs against the store path directly. Run 'nix run .#fix' to add any
-  # missing headers.
+  # manifest validator, the scripts in hack/, and the end-to-end tests.
+  # Generated models under schemas/python carry their own codegen banner, and
+  # config (*.toml) and vendored upstream CRDs (*.yaml) are excluded.
+  # addlicense -check only reads, so it runs against the store path directly.
+  # Run 'nix run .#fix' to add any missing headers.
   license =
     pkgs.runCommand "modelplane-license-check"
       {
@@ -175,7 +198,7 @@ in
           -ignore '**/*.toml' \
           -ignore '**/*.yaml' \
           -ignore '**/*.yml' \
-          functions/ docs/utils/validate/ hack/ nix.sh
+          functions/ docs/utils/validate/ hack/ e2e/ nix.sh
         mkdir -p $out
         touch $out/.license-check-passed
       '';
