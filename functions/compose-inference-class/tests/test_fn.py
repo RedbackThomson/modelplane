@@ -34,13 +34,20 @@ class Case:
     """A test case for compose-inference-class."""
 
     name: str
+    reason: str
     req: fnv1.RunFunctionRequest
     want: fnv1.RunFunctionResponse
 
 
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
+
+
 COMPOSE_CASES = [
     Case(
-        name="marks XR ready with Accepted condition and empty status",
+        name="DRAGPU",
+        reason="An InferenceClass describing one DRA GPU is ready and Accepted, with an empty status.",
         req=fnv1.RunFunctionRequest(
             observed=fnv1.State(
                 composite=fnv1.Resource(
@@ -59,7 +66,7 @@ COMPOSE_CASES = [
                                     ),
                                 ],
                             ),
-                        ).model_dump(exclude_none=True, mode="json")
+                        ).model_dump(exclude_none=True, mode="json", by_alias=True)
                     ),
                 ),
             ),
@@ -72,6 +79,7 @@ COMPOSE_CASES = [
                     ready=fnv1.READY_TRUE,
                 ),
             ),
+            context=structpb.Struct(),
             conditions=[
                 fnv1.Condition(
                     type="Accepted",
@@ -79,19 +87,13 @@ COMPOSE_CASES = [
                     reason="Available",
                 ),
             ],
-            context=structpb.Struct(),
         ),
     ),
 ]
-
-
-def _to_dict(msg: message.Message) -> dict:
-    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
-    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
 
 
 @pytest.mark.parametrize("case", COMPOSE_CASES, ids=lambda case: case.name)
 def test_compose(case: Case) -> None:
     """RunFunction marks the InferenceClass ready."""
     got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
-    assert _to_dict(got) == _to_dict(case.want)
+    assert _to_dict(got) == _to_dict(case.want), case.reason

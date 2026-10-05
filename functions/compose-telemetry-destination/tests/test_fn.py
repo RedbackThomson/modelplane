@@ -17,6 +17,7 @@
 import asyncio
 import dataclasses
 import json
+from typing import Any
 
 import pytest
 from crossplane.function import resource
@@ -25,6 +26,8 @@ from function import fn
 from google.protobuf import duration_pb2 as durationpb
 from google.protobuf import json_format, message
 from google.protobuf import struct_pb2 as structpb
+from models.ai.modelplane.telemetrydestination import v1alpha1
+from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
 
 
 @dataclasses.dataclass
@@ -32,8 +35,28 @@ class Case:
     """A test case for compose-telemetry-destination."""
 
     name: str
+    reason: str
     req: fnv1.RunFunctionRequest
     want: fnv1.RunFunctionResponse
+
+
+def _telemetry_destination(*, sinks: list[v1alpha1.Sink], extensions: dict[str, Any] | None) -> fnv1.Resource:
+    """The TelemetryDestination XR named default, exporting through sinks, with extensions unless they're None."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            v1alpha1.TelemetryDestination(
+                metadata=metav1.ObjectMeta(name="default"),
+                spec=v1alpha1.Spec(sinks=sinks, extensions=extensions),
+            ).model_dump(exclude_none=True, mode="json", by_alias=True)
+        ),
+    )
+
+
+def _desired_telemetry_destination(*, status: dict | None, ready: fnv1.Ready) -> fnv1.Resource:
+    """The desired TelemetryDestination XR, carrying status, or only its readiness if status is None."""
+    if status is None:
+        return fnv1.Resource(ready=ready)
+    return fnv1.Resource(resource=resource.dict_to_struct({"status": status}), ready=ready)
 
 
 def _to_dict(msg: message.Message) -> dict:
@@ -41,206 +64,311 @@ def _to_dict(msg: message.Message) -> dict:
     return json.loads(json_format.MessageToJson(msg, sort_keys=True))
 
 
-def _compose_cases() -> list[Case]:
-    def sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> dict:
-        """A sink wiring its own authenticator, which is the case worth validating."""
-        return {
-            "name": name,
-            "type": type_,
-            "endpoint": "https://otel.acme.example",
-            "config": {"auth": {"authenticator": "oauth2client/acme"}},
-            **({"secretRef": {"name": secret}} if secret else {}),
-        }
-
-    sinks = [sink()]
-    extensions = {"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}}
-
-    def xr(spec: dict) -> dict:
-        return {
-            "apiVersion": "modelplane.ai/v1alpha1",
-            "kind": "TelemetryDestination",
-            "metadata": {"name": "default"},
-            "spec": spec,
-        }
-
-    def req(spec: dict, secrets: list | None = None) -> fnv1.RunFunctionRequest:
-        r = fnv1.RunFunctionRequest(
-            observed=fnv1.State(composite=fnv1.Resource(resource=resource.dict_to_struct(xr(spec)))),
-        )
-        if secrets is not None:
-            r.required_resources["secret-primary"].items.extend([fnv1.Resource(resource=s) for s in secrets])
-        return r
-
-    def want(
-        ready: fnv1.Ready, status: dict | None, cond: fnv1.Condition, secret: str | None = None
-    ) -> fnv1.RunFunctionResponse:
-        composite = fnv1.Resource(ready=ready)
-        if status is not None:
-            composite.resource.CopyFrom(resource.dict_to_struct(status))
-        rsp = fnv1.RunFunctionResponse(
+# A sink's credential requirement names modelplane-system: unqualified, it would
+# resolve a Secret of that name in any namespace, and accept the wrong
+# credential.
+COMPOSE_CASES = [
+    Case(
+        name="AuthenticatorDefined",
+        reason=(
+            "With its sink's authenticator defined under extensions, the destination is Accepted and Ready, "
+            "naming the sink it exports through."
+        ),
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            config={"auth": {"authenticator": "oauth2client/acme"}},
+                        ),
+                    ],
+                    extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+                ),
+            ),
+        ),
+        want=fnv1.RunFunctionResponse(
             meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-            desired=fnv1.State(composite=composite),
-            conditions=[cond],
+            desired=fnv1.State(composite=_desired_telemetry_destination(status={}, ready=fnv1.READY_TRUE)),
             context=structpb.Struct(),
-        )
-        if secret is not None:
-            rsp.requirements.resources["secret-primary"].api_version = "v1"
-            rsp.requirements.resources["secret-primary"].kind = "Secret"
-            rsp.requirements.resources["secret-primary"].match_name = secret
-            # Qualified: unqualified it would resolve a Secret of that
-            # name in any namespace, and accept the wrong credential.
-            rsp.requirements.resources["secret-primary"].namespace = "modelplane-system"
-        return rsp
-
-    return [
-        Case(
-            name="ready, naming the sinks it sends through",
-            req=req({"sinks": sinks, "extensions": extensions}),
-            want=want(
-                fnv1.READY_TRUE,
-                {"status": {}},
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_TRUE,
                     reason="Available",
                     message="Exporting through otlphttp/primary",
                 ),
+            ],
+        ),
+    ),
+    Case(
+        name="NoAuthenticator",
+        reason="A sink that references no authenticator needs no extensions, so the destination is Ready.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="prom",
+                            type="prometheusremotewrite",
+                            endpoint="https://prom.acme.example/api/v1/write",
+                        ),
+                    ],
+                    extensions=None,
+                ),
             ),
         ),
-        Case(
-            name="ready with an exporter that references no authenticator at all",
-            req=req(
-                {
-                    "sinks": [
-                        {
-                            "name": "prom",
-                            "type": "prometheusremotewrite",
-                            "endpoint": "https://prom.acme.example/api/v1/write",
-                        }
-                    ]
-                }
-            ),
-            want=want(
-                fnv1.READY_TRUE,
-                {"status": {}},
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status={}, ready=fnv1.READY_TRUE)),
+            context=structpb.Struct(),
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_TRUE,
                     reason="Available",
                     message="Exporting through prometheusremotewrite/prom",
                 ),
-            ),
+            ],
         ),
-        Case(
-            name="ready with no extensions, because Modelplane composes the authenticator",
-            req=req(
-                {
-                    "sinks": [
-                        {
-                            "name": "primary",
-                            "type": "otlphttp",
-                            "endpoint": "https://otel.acme.example",
-                            "secretRef": {"name": "telemetry-credentials"},
-                            "auth": {"bearerTokenKey": "token"},
-                        }
-                    ]
+    ),
+    Case(
+        name="BearerTokenAuth",
+        reason=(
+            "With a sink that sets auth and a secretRef, and names no authenticator in its config, "
+            "the destination is Ready once its credential Secret is present."
+        ),
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            secretRef=v1alpha1.SecretRef(name="telemetry-credentials"),
+                            auth=v1alpha1.Auth(bearerTokenKey="token"),
+                        ),
+                    ],
+                    extensions=None,
+                ),
+            ),
+            required_resources={
+                "secret-primary": fnv1.Resources(
+                    items=[
+                        fnv1.Resource(
+                            resource=resource.dict_to_struct(
+                                {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
+                            ),
+                        ),
+                    ],
+                ),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status={}, ready=fnv1.READY_TRUE)),
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "secret-primary": fnv1.ResourceSelector(
+                        api_version="v1",
+                        kind="Secret",
+                        match_name="telemetry-credentials",
+                        namespace="modelplane-system",
+                    ),
                 },
-                secrets=[
-                    resource.dict_to_struct(
-                        {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
-                    )
-                ],
             ),
-            want=want(
-                fnv1.READY_TRUE,
-                {"status": {}},
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_TRUE,
                     reason="Available",
                     message="Exporting through otlphttp/primary",
                 ),
-                secret="telemetry-credentials",
-            ),
+            ],
         ),
-        Case(
-            name="ready once the credential Secret exists",
-            req=req(
-                {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
-                secrets=[
-                    resource.dict_to_struct(
-                        {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
-                    )
-                ],
+    ),
+    Case(
+        name="SecretExists",
+        reason="Once its sink's credential Secret exists, the destination is Accepted and Ready.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            config={"auth": {"authenticator": "oauth2client/acme"}},
+                            secretRef=v1alpha1.SecretRef(name="telemetry-credentials"),
+                        ),
+                    ],
+                    extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+                ),
             ),
-            want=want(
-                fnv1.READY_TRUE,
-                {"status": {}},
+            required_resources={
+                "secret-primary": fnv1.Resources(
+                    items=[
+                        fnv1.Resource(
+                            resource=resource.dict_to_struct(
+                                {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "telemetry-credentials"}}
+                            ),
+                        ),
+                    ],
+                ),
+            },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status={}, ready=fnv1.READY_TRUE)),
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "secret-primary": fnv1.ResourceSelector(
+                        api_version="v1",
+                        kind="Secret",
+                        match_name="telemetry-credentials",
+                        namespace="modelplane-system",
+                    ),
+                },
+            ),
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_TRUE,
                     reason="Available",
                     message="Exporting through otlphttp/primary",
                 ),
-                secret="telemetry-credentials",
+            ],
+        ),
+    ),
+    Case(
+        name="SecretUnresolved",
+        reason="Until its sink's credential Secret requirement resolves, the destination waits for it and isn't Ready.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            config={"auth": {"authenticator": "oauth2client/acme"}},
+                            secretRef=v1alpha1.SecretRef(name="telemetry-credentials"),
+                        ),
+                    ],
+                    extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+                ),
             ),
         ),
-        Case(
-            name="waits for the credential Secret to resolve",
-            req=req(
-                {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status=None, ready=fnv1.READY_FALSE)),
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "secret-primary": fnv1.ResourceSelector(
+                        api_version="v1",
+                        kind="Secret",
+                        match_name="telemetry-credentials",
+                        namespace="modelplane-system",
+                    ),
+                },
             ),
-            want=want(
-                fnv1.READY_FALSE,
-                None,
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_FALSE,
                     reason="WaitingForSecret",
                     message="Waiting for the credential Secret to resolve",
                 ),
-                secret="telemetry-credentials",
+            ],
+        ),
+    ),
+    Case(
+        name="UnknownAuthenticator",
+        reason="A sink naming an authenticator no extension defines leaves the destination not Ready.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            config={"auth": {"authenticator": "oauth2client/acme"}},
+                        ),
+                    ],
+                    extensions=None,
+                ),
             ),
         ),
-        Case(
-            name="not ready when a sink names an authenticator nothing defines",
-            req=req({"sinks": sinks}),
-            want=want(
-                fnv1.READY_FALSE,
-                None,
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status=None, ready=fnv1.READY_FALSE)),
+            context=structpb.Struct(),
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_FALSE,
                     reason="UnknownAuthenticator",
                     message="No extension defines oauth2client/acme, so the collector would refuse to start",
                 ),
-            ),
+            ],
         ),
-        Case(
-            name="not ready when the credential Secret is missing",
-            req=req(
-                {"sinks": [sink(secret="telemetry-credentials")], "extensions": extensions},
-                secrets=[],
+    ),
+    Case(
+        name="SecretMissing",
+        reason="When its sink's credential Secret doesn't exist, the destination isn't Ready and names the Secret.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_telemetry_destination(
+                    sinks=[
+                        v1alpha1.Sink(
+                            name="primary",
+                            type="otlphttp",
+                            endpoint="https://otel.acme.example",
+                            config={"auth": {"authenticator": "oauth2client/acme"}},
+                            secretRef=v1alpha1.SecretRef(name="telemetry-credentials"),
+                        ),
+                    ],
+                    extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+                ),
             ),
-            want=want(
-                fnv1.READY_FALSE,
-                None,
+            required_resources={"secret-primary": fnv1.Resources()},
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(composite=_desired_telemetry_destination(status=None, ready=fnv1.READY_FALSE)),
+            context=structpb.Struct(),
+            requirements=fnv1.Requirements(
+                resources={
+                    "secret-primary": fnv1.ResourceSelector(
+                        api_version="v1",
+                        kind="Secret",
+                        match_name="telemetry-credentials",
+                        namespace="modelplane-system",
+                    ),
+                },
+            ),
+            conditions=[
                 fnv1.Condition(
                     type="Accepted",
                     status=fnv1.STATUS_CONDITION_FALSE,
                     reason="SecretNotFound",
-                    message=(
-                        "Secret telemetry-credentials does not exist, so sink primary has no credential to send with"
-                    ),
+                    message="Secret telemetry-credentials does not exist, so sink primary has no credential to send with",
                 ),
-                secret="telemetry-credentials",
-            ),
+            ],
         ),
-    ]
+    ),
+]
 
 
-@pytest.mark.parametrize("case", _compose_cases(), ids=lambda case: case.name)
+@pytest.mark.parametrize("case", COMPOSE_CASES, ids=lambda case: case.name)
 def test_compose(case: Case) -> None:
-    """The function reports whether a destination can actually be sent through."""
+    """RunFunction reports whether the destination can be sent through."""
     got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
-    assert _to_dict(got) == _to_dict(case.want)
+    assert _to_dict(got) == _to_dict(case.want), case.reason

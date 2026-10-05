@@ -14,74 +14,109 @@
 
 """Tests for the serving stack component lists.
 
-The join itself is the assertion: components() fails closed on
-duplicate keys and on depends_on edges the join didn't produce, so
-iterating every cloud and stack pair gates every list - including the
-generated ones, once mapped - without involving fn.py.
+The join itself is the assertion: join() fails closed on duplicate
+keys and on depends_on edges the join didn't produce, so iterating
+every cloud and stack pair gates every list - including the generated
+ones, once mapped - without involving fn.py. The tests after it are
+properties every joined stack must hold, each checked over the whole
+stack at once so a failure lists every component that breaks it.
+JOIN_FAILS_CLOSED_CASES then checks that join rejects a cloud or stack
+it doesn't know. The last two tests cover Civo's NVLink transform,
+which rewrites a joined stack to disable NVLink on the pools that need
+it.
 """
+
+import dataclasses
 
 import pytest
 from function import stacks
 from function.stacks.clouds import civo
 
 
+@dataclasses.dataclass
+class JoinFailsClosedCase:
+    """A test case for stacks.join rejecting a cloud or stack."""
+
+    name: str
+    reason: str
+    cloud: str
+    stack: str
+    want: str
+
+
+@dataclasses.dataclass
+class WithNvLinkDisabledCase:
+    """A test case for civo.with_nvlink_disabled."""
+
+    name: str
+    reason: str
+    components: list[stacks.Component]
+    pools: list[str]
+    want: list[stacks.Component]
+
+
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_every_cloud_and_stack_joins(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+def test_join_not_empty(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """Every cloud and stack pair joins into a non-empty stack."""
-    got = stacks.join(cloud, stack)
-    assert got, "a joined stack can't be empty"
+    assert stacks.join(cloud, stack), "a joined stack can't be empty"
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_charts_have_reserved_release_names(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+def test_release_names(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """Every Chart's Helm release is named mp-<chart>."""
-    for c in stacks.join(cloud, stack):
-        if isinstance(c, stacks.Chart):
-            assert c.release == f"mp-{c.chart}", (
-                f"{c.key}: release names are mp-<chart>: stable across upgrades, reserved to Modelplane"
-            )
+    charts = [c for c in stacks.join(cloud, stack) if isinstance(c, stacks.Chart)]
+    assert {c.key: c.release for c in charts} == {c.key: f"mp-{c.chart}" for c in charts}, (
+        "release names are mp-<chart>: stable across upgrades, reserved to Modelplane"
+    )
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_manifests_are_populated(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+def test_manifests_populated(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """Every Manifests entry carries at least one manifest."""
-    for c in stacks.join(cloud, stack):
-        if isinstance(c, stacks.Manifests):
-            assert c.manifests, f"{c.key}: a Manifests entry can't be empty"
+    empty = [c.key for c in stacks.join(cloud, stack) if isinstance(c, stacks.Manifests) and not c.manifests]
+    assert empty == [], "a Manifests entry can't be empty"
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_multi_doc_manifests_derive_per_doc_keys(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
-    """A multi-doc Manifests entry renders a key per doc, and anything else renders its own key."""
-    for c in stacks.join(cloud, stack):
-        keys = stacks.components.doc_keys(c)
+def test_doc_keys(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+    """doc_keys agrees with a restatement of its own rule."""
+    # This restates doc_keys line for line, so it only catches one copy
+    # changing without the other. COMPOSED_RESOURCE_KEYS_CASES in test_fn.py
+    # pins the real keys, as literals.
+    joined = stacks.join(cloud, stack)
+    want = {}
+    for c in joined:
         if isinstance(c, stacks.Chart) or len(c.manifests) == 1:
-            assert keys == [c.key]
-            continue
-        assert keys == [f"{c.key}-{doc['metadata']['name']}" for doc in c.manifests], (
-            f"{c.key}: a multi-doc bundle renders one Object per doc, keyed <key>-<name>"
-        )
+            want[c.key] = [c.key]
+        else:
+            want[c.key] = [f"{c.key}-{doc['metadata']['name']}" for doc in c.manifests]
+    assert {c.key: stacks.components.doc_keys(c) for c in joined} == want, (
+        "a multi-doc bundle renders one Object per doc, keyed <key>-<name>"
+    )
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_ready_entries_are_single_doc(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+def test_ready_single_doc(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """A Manifests entry with a readiness query carries a single manifest."""
     # A readiness CEL query applies to every doc in an entry, so an
     # entry carrying one keeps to a single manifest - a Service or
     # ServiceAccount has no status conditions to satisfy it.
-    for c in stacks.join(cloud, stack):
-        if isinstance(c, stacks.Manifests) and c.ready is not None:
-            assert len(c.manifests) == 1, c.key
+    not_single = [
+        c.key
+        for c in stacks.join(cloud, stack)
+        if isinstance(c, stacks.Manifests) and c.ready is not None and len(c.manifests) != 1
+    ]
+    assert not_single == [], "a readiness query applies to every doc, so an entry carrying one has one manifest"
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
-def test_depended_on_charts_wait(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
+def test_dependencies_wait(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """Every Chart another component depends on sets wait."""
     # A chart another component depends on renders with helm --wait,
     # so its Ready means healthy and the install gate orders
@@ -89,16 +124,14 @@ def test_depended_on_charts_wait(cloud: stacks.Cloud, stack: stacks.Stack) -> No
     # gate would open the moment Helm accepted the manifests.
     joined = stacks.join(cloud, stack)
     depended_on = {dep for c in joined for dep in c.depends_on}
-    for c in joined:
-        if isinstance(c, stacks.Chart) and c.key in depended_on:
-            assert c.wait, f"{c.key}: a depended-on chart must set wait"
+    not_waiting = [c.key for c in joined if isinstance(c, stacks.Chart) and c.key in depended_on and not c.wait]
+    assert not_waiting == [], "a depended-on chart must set wait"
 
 
 @pytest.mark.parametrize("stack", stacks.stacks())
 @pytest.mark.parametrize("cloud", stacks.clouds())
 def test_no_wildcard_tolerations(cloud: stacks.Cloud, stack: stacks.Stack) -> None:
     """No component of a joined stack carries a keyless toleration."""
-
     # A keyless toleration tolerates every taint, so the pod lands
     # on tainted GPU nodes: control-plane charts squat on
     # accelerated capacity and their eviction stalls autoscaler
@@ -107,13 +140,13 @@ def test_no_wildcard_tolerations(cloud: stacks.Cloud, stack: stacks.Stack) -> No
     # (TOLERATIONS in generate.py). This pins that no keyless
     # toleration survives in any joined stack, chart values and
     # manifests alike.
+    wildcards = []
+
     def check(node: object, where: str) -> None:
         if isinstance(node, dict):
             for key, val in node.items():
                 if key == "tolerations" and isinstance(val, list):
-                    for toleration in val:
-                        assert isinstance(toleration, dict), f"keyless (wildcard) toleration in {where}"
-                        assert "key" in toleration, f"keyless (wildcard) toleration in {where}"
+                    wildcards.extend((where, t) for t in val if not (isinstance(t, dict) and "key" in t))
                 else:
                     check(val, where)
         elif isinstance(node, list):
@@ -122,81 +155,293 @@ def test_no_wildcard_tolerations(cloud: stacks.Cloud, stack: stacks.Stack) -> No
 
     for c in stacks.join(cloud, stack):
         check(c.values if isinstance(c, stacks.Chart) else c.manifests, c.key)
+    assert wildcards == [], "keyless (wildcard) tolerations, by component"
 
 
-def test_unknown_cloud_and_stack_fail_closed() -> None:
-    """join rejects an unknown cloud or stack."""
-    # The Literal types reject these at type-checking time; this
-    # exercises the runtime guard behind them, which catches the API
-    # and the stacks package disagreeing on a value.
-    with pytest.raises(ValueError, match="unknown cloud 'Mars'"):
-        stacks.join("Mars", "Standard")  # ty: ignore[invalid-argument-type]
-    with pytest.raises(ValueError, match="unknown stack 'Turbo'"):
-        stacks.join("Nebius", "Turbo")  # ty: ignore[invalid-argument-type]
+# The Literal types reject these at type-checking time; these exercise the
+# runtime guard behind them, which catches the API and the stacks package
+# disagreeing on a value.
+JOIN_FAILS_CLOSED_CASES = [
+    JoinFailsClosedCase(
+        name="UnknownCloud",
+        reason="A cloud the stacks package doesn't know fails the join.",
+        cloud="Mars",
+        stack="Standard",
+        want="unknown cloud 'Mars'",
+    ),
+    JoinFailsClosedCase(
+        name="UnknownStack",
+        reason="A stack the stacks package doesn't know fails the join.",
+        cloud="Nebius",
+        stack="Turbo",
+        want="unknown stack 'Turbo'",
+    ),
+]
 
 
-def test_gpu_operator_switches_to_nvidia_driver_crd() -> None:
-    """with_nvlink_disabled switches the gpu-operator chart to NVIDIADriver-CRD mode."""
-    # The chart's default NVIDIADriver (deployDefaultCR) keeps driving
-    # pools the transform doesn't name, so flipping modes changes
-    # nothing for them.
-    got = civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["h100-pool"])
-    op = next(c for c in got if isinstance(c, stacks.Chart) and c.key == "gpu-operator")
-    assert op.values is not None
-    assert op.values["driver"]["nvidiaDriverCRD"] == {"enabled": True, "deployDefaultCR": True}
+@pytest.mark.parametrize("case", JOIN_FAILS_CLOSED_CASES, ids=lambda case: case.name)
+def test_join_fails_closed(case: JoinFailsClosedCase) -> None:
+    """join rejects a cloud or stack it doesn't know."""
+    with pytest.raises(ValueError, match=case.want):
+        stacks.join(case.cloud, case.stack)  # ty: ignore[invalid-argument-type]  # cases pass values outside the Literals
 
 
-def test_each_pool_gets_its_own_driver() -> None:
-    """with_nvlink_disabled adds one NVIDIADriver per named pool, selecting that pool's nodes."""
-    got = civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["pool-a", "pool-b"])
-    drivers = [c for c in got if isinstance(c, stacks.Manifests) and c.key.startswith("nvlink-disabled-driver-")]
-    assert [c.key for c in drivers] == ["nvlink-disabled-driver-pool-a", "nvlink-disabled-driver-pool-b"]
-    for c, pool in zip(drivers, ["pool-a", "pool-b"], strict=True):
-        # Ready entries keep to a single doc, and gate on the
-        # operator-populated state so the DRA driver's install
-        # gate orders on driver health.
-        assert len(c.manifests) == 1, pool
-        assert c.ready is not None, pool
-        assert c.depends_on == ["gpu-operator", "nvlink-disable-config"], pool
-        spec = c.manifests[0]["spec"]
-        assert spec["nodeSelector"] == {"modelplane.ai/pool": pool}, pool
-        assert spec["kernelModuleConfig"] == {"name": "nvidia-kernel-config"}, pool
+# Each case's input is the real joined Civo stack rather than a literal one.
+# The transform finds the gpu-operator and DRA driver charts by key, and where
+# a key matches nothing it rewrites nothing, without complaint. Only the real
+# stack shows the keys still match the charts Civo composes. The cost is that
+# both wants restate those two charts as Civo pins them, so bumping either
+# chart breaks both cases.
+WITH_NVLINK_DISABLED_CASES = [
+    WithNvLinkDisabledCase(
+        name="OnePool",
+        reason=(
+            "Disabling NVLink on one pool switches the gpu-operator chart to NVIDIADriver-CRD mode, adds the kernel "
+            "module ConfigMap and that pool's NVIDIADriver, and gates the DRA driver on it."
+        ),
+        components=stacks.join("Civo", "Standard"),
+        pools=["h100-pool"],
+        want=[
+            stacks.Chart(
+                key="gpu-operator",
+                release="mp-gpu-operator",
+                namespace="gpu-operator",
+                chart="gpu-operator",
+                repository="https://helm.ngc.nvidia.com/nvidia",
+                version="v26.3.3",
+                wait=True,
+                depends_on=["node-feature-discovery", "cert-manager"],
+                values={
+                    "ccManager": {"enabled": False},
+                    "cdi": {"default": True, "enabled": True},
+                    "daemonsets": {
+                        "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+                    },
+                    "dcgm": {"enabled": False},
+                    "dcgmExporter": {"enabled": False},
+                    "devicePlugin": {"enabled": False},
+                    "driver": {
+                        "enabled": True,
+                        "maxParallelUpgrades": 5,
+                        "rdma": {"enabled": False},
+                        "useOpenKernelModules": True,
+                        "version": "580.173.02",
+                        # deployDefaultCR keeps the chart's default NVIDIADriver
+                        # driving the pools the transform doesn't name, so
+                        # flipping modes changes nothing for them.
+                        "nvidiaDriverCRD": {"enabled": True, "deployDefaultCR": True},
+                    },
+                    "fullnameOverride": "gpu-operator",
+                    "gdrcopy": {"enabled": False},
+                    "gfd": {"enabled": True},
+                    "kataSandboxDevicePlugin": {"enabled": False},
+                    "migManager": {"enabled": False},
+                    "nfd": {"enabled": False},
+                    "operator": {
+                        "resources": {
+                            "limits": {"cpu": "500m", "memory": "700Mi"},
+                            "requests": {"cpu": "200m", "memory": "300Mi"},
+                        },
+                        "tolerations": [],
+                        "upgradeCRD": True,
+                    },
+                    "toolkit": {"enabled": False},
+                    "validator": {"plugin": {"env": [{"name": "WITH_WORKLOAD", "value": "false"}]}},
+                },
+            ),
+            stacks.Chart(
+                key="nvidia-dra-driver-gpu",
+                release="mp-dra-driver-nvidia-gpu",
+                namespace="nvidia-dra-driver",
+                chart="dra-driver-nvidia-gpu",
+                repository="oci://registry.k8s.io/dra-driver-nvidia/charts",
+                version="0.4.1",
+                depends_on=["gpu-operator", "nvlink-disabled-driver-h100-pool"],
+                values={
+                    "gpuResourcesEnabledOverride": True,
+                    "nvidiaDriverRoot": "/run/nvidia/driver",
+                    "resources": {"computeDomains": {"enabled": False}},
+                },
+            ),
+            stacks.Manifests(
+                key="nvlink-disable-config",
+                manifests=[
+                    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "gpu-operator"}},
+                    {
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {"name": "nvidia-kernel-config", "namespace": "gpu-operator"},
+                        "data": {"nvidia.conf": "options nvidia NVreg_NvLinkDisable=1"},
+                    },
+                ],
+            ),
+            stacks.Manifests(
+                key="nvlink-disabled-driver-h100-pool",
+                manifests=[
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "NVIDIADriver",
+                        "metadata": {"name": "nvlink-disabled-h100-pool"},
+                        "spec": {
+                            "driverType": "gpu",
+                            # The chart's driver pin and module flavor: one
+                            # review moves both.
+                            "version": "580.173.02",
+                            "useOpenKernelModules": True,
+                            "nodeSelector": {"modelplane.ai/pool": "h100-pool"},
+                            "kernelModuleConfig": {"name": "nvidia-kernel-config"},
+                            "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
+                        },
+                    }
+                ],
+                depends_on=["gpu-operator", "nvlink-disable-config"],
+                # The operator-populated state, so the DRA driver's install
+                # gate orders on driver health.
+                ready='object.status.state == "ready"',
+            ),
+        ],
+    ),
+    WithNvLinkDisabledCase(
+        name="TwoPools",
+        reason="Disabling NVLink on two pools adds an NVIDIADriver for each, and gates the DRA driver on both.",
+        components=stacks.join("Civo", "Standard"),
+        pools=["pool-a", "pool-b"],
+        want=[
+            stacks.Chart(
+                key="gpu-operator",
+                release="mp-gpu-operator",
+                namespace="gpu-operator",
+                chart="gpu-operator",
+                repository="https://helm.ngc.nvidia.com/nvidia",
+                version="v26.3.3",
+                wait=True,
+                depends_on=["node-feature-discovery", "cert-manager"],
+                values={
+                    "ccManager": {"enabled": False},
+                    "cdi": {"default": True, "enabled": True},
+                    "daemonsets": {
+                        "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+                    },
+                    "dcgm": {"enabled": False},
+                    "dcgmExporter": {"enabled": False},
+                    "devicePlugin": {"enabled": False},
+                    "driver": {
+                        "enabled": True,
+                        "maxParallelUpgrades": 5,
+                        "rdma": {"enabled": False},
+                        "useOpenKernelModules": True,
+                        "version": "580.173.02",
+                        "nvidiaDriverCRD": {"enabled": True, "deployDefaultCR": True},
+                    },
+                    "fullnameOverride": "gpu-operator",
+                    "gdrcopy": {"enabled": False},
+                    "gfd": {"enabled": True},
+                    "kataSandboxDevicePlugin": {"enabled": False},
+                    "migManager": {"enabled": False},
+                    "nfd": {"enabled": False},
+                    "operator": {
+                        "resources": {
+                            "limits": {"cpu": "500m", "memory": "700Mi"},
+                            "requests": {"cpu": "200m", "memory": "300Mi"},
+                        },
+                        "tolerations": [],
+                        "upgradeCRD": True,
+                    },
+                    "toolkit": {"enabled": False},
+                    "validator": {"plugin": {"env": [{"name": "WITH_WORKLOAD", "value": "false"}]}},
+                },
+            ),
+            stacks.Chart(
+                key="nvidia-dra-driver-gpu",
+                release="mp-dra-driver-nvidia-gpu",
+                namespace="nvidia-dra-driver",
+                chart="dra-driver-nvidia-gpu",
+                repository="oci://registry.k8s.io/dra-driver-nvidia/charts",
+                version="0.4.1",
+                depends_on=["gpu-operator", "nvlink-disabled-driver-pool-a", "nvlink-disabled-driver-pool-b"],
+                values={
+                    "gpuResourcesEnabledOverride": True,
+                    "nvidiaDriverRoot": "/run/nvidia/driver",
+                    "resources": {"computeDomains": {"enabled": False}},
+                },
+            ),
+            stacks.Manifests(
+                key="nvlink-disable-config",
+                manifests=[
+                    {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "gpu-operator"}},
+                    {
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {"name": "nvidia-kernel-config", "namespace": "gpu-operator"},
+                        "data": {"nvidia.conf": "options nvidia NVreg_NvLinkDisable=1"},
+                    },
+                ],
+            ),
+            stacks.Manifests(
+                key="nvlink-disabled-driver-pool-a",
+                manifests=[
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "NVIDIADriver",
+                        "metadata": {"name": "nvlink-disabled-pool-a"},
+                        "spec": {
+                            "driverType": "gpu",
+                            "version": "580.173.02",
+                            "useOpenKernelModules": True,
+                            "nodeSelector": {"modelplane.ai/pool": "pool-a"},
+                            "kernelModuleConfig": {"name": "nvidia-kernel-config"},
+                            "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
+                        },
+                    }
+                ],
+                depends_on=["gpu-operator", "nvlink-disable-config"],
+                ready='object.status.state == "ready"',
+            ),
+            stacks.Manifests(
+                key="nvlink-disabled-driver-pool-b",
+                manifests=[
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "NVIDIADriver",
+                        "metadata": {"name": "nvlink-disabled-pool-b"},
+                        "spec": {
+                            "driverType": "gpu",
+                            "version": "580.173.02",
+                            "useOpenKernelModules": True,
+                            "nodeSelector": {"modelplane.ai/pool": "pool-b"},
+                            "kernelModuleConfig": {"name": "nvidia-kernel-config"},
+                            "tolerations": [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}],
+                        },
+                    }
+                ],
+                depends_on=["gpu-operator", "nvlink-disable-config"],
+                ready='object.status.state == "ready"',
+            ),
+        ],
+    ),
+]
 
 
-def test_driver_pin_mirrors_the_chart() -> None:
-    """A per-pool NVIDIADriver installs the same driver as the chart's default CR."""
-    # One review moves both: the per-pool NVIDIADriver must install
-    # the same driver the chart's default CR does.
-    got = civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["h100-pool"])
-    op = next(c for c in got if isinstance(c, stacks.Chart) and c.key == "gpu-operator")
-    driver = next(c for c in got if isinstance(c, stacks.Manifests) and c.key == "nvlink-disabled-driver-h100-pool")
-    assert op.values is not None
-    spec = driver.manifests[0]["spec"]
-    assert spec["version"] == op.values["driver"]["version"]
-    assert spec["useOpenKernelModules"] == op.values["driver"]["useOpenKernelModules"]
+@pytest.mark.parametrize("case", WITH_NVLINK_DISABLED_CASES, ids=lambda case: case.name)
+def test_with_nvlink_disabled(case: WithNvLinkDisabledCase) -> None:
+    """with_nvlink_disabled rewrites a joined stack to disable NVLink on the named pools."""
+    got = civo.with_nvlink_disabled(case.components, case.pools)
+    # Only what the transform adds or rewrites, in order. The rest of the list
+    # is the joined stack passed through, vendored CRDs and all, and restating
+    # it would bury the components each case is about. A component the
+    # transform dropped wouldn't show up here.
+    changed = [c for c in got if c not in case.components]
+    assert changed == case.want, case.reason
 
 
-def test_configmap_carries_the_module_option() -> None:
-    """with_nvlink_disabled adds the kernel module ConfigMap, in its own Namespace."""
-    got = civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["h100-pool"])
-    config = next(c for c in got if isinstance(c, stacks.Manifests) and c.key == "nvlink-disable-config")
-    kinds = [doc["kind"] for doc in config.manifests]
-    assert kinds == ["Namespace", "ConfigMap"]
-    assert config.manifests[1]["data"] == {"nvidia.conf": "options nvidia NVreg_NvLinkDisable=1"}
-
-
-def test_dra_driver_gates_on_pool_drivers() -> None:
-    """The DRA driver depends on every per-pool NVIDIADriver."""
-    got = civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["pool-a", "pool-b"])
-    dra = next(c for c in got if isinstance(c, stacks.Chart) and c.key == "nvidia-dra-driver-gpu")
-    assert dra.depends_on == ["gpu-operator", "nvlink-disabled-driver-pool-a", "nvlink-disabled-driver-pool-b"]
-
-
-def test_join_is_not_mutated() -> None:
+def test_join_not_mutated() -> None:
     """with_nvlink_disabled leaves the joined stack it was given unchanged."""
     # The transform must copy: the joined lists share the module-level
     # component objects, and mutating them would leak NVLink disable
-    # into every later request.
+    # into every later request. This checks the two fields the transform
+    # rewrites against their stock values rather than comparing the stack
+    # before and after, because a before-and-after comparison would miss an
+    # edit an earlier test's call had already made.
     civo.with_nvlink_disabled(stacks.join("Civo", "Standard"), ["h100-pool"])
     joined = stacks.join("Civo", "Standard")
     op = next(c for c in joined if isinstance(c, stacks.Chart) and c.key == "gpu-operator")

@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the collector this stack composes."""
+"""Tests for the collector this stack composes.
 
+A table per collector function, each comparing what it renders whole: the
+config, the OTTL statements and the blocks they run in, the manifests, the
+exporters and the authenticators. Then the properties no single rendering
+shows: what the substrate job's port rewrite does to an address, and what holds
+of the unit conversions and the built-in mappings.
+"""
+
+import dataclasses
 import re
 import typing
 
@@ -24,12 +32,85 @@ from models.ai.modelplane.metricmapping import v1alpha1 as mmv1alpha1
 from models.ai.modelplane.telemetrydestination import v1alpha1 as tdv1alpha1
 from pydantic import ValidationError
 
-# A client authenticator: an exporter needs one of those, not the oidc
-# extension, which authenticates callers of a receiver.
-_EXTENSIONS = {"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}}
+
+@dataclasses.dataclass
+class ConfigCase:
+    """A test case for collector.config."""
+
+    name: str
+    reason: str
+    cluster: str
+    mappings: list[mmv1alpha1.MetricMapping]
+    sinks: list[tdv1alpha1.Sink]
+    extensions: dict
+    want: dict
 
 
-def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = None) -> tdv1alpha1.Sink:
+@dataclasses.dataclass
+class PortRewriteCase:
+    """A test case for the substrate job's rewrite of a pod's address onto its annotated port."""
+
+    name: str
+    reason: str
+    address: str
+    want: str
+
+
+@dataclasses.dataclass
+class StatementsCase:
+    """A test case for collector.statements."""
+
+    name: str
+    reason: str
+    mappings: list[mmv1alpha1.MetricMapping]
+    want: tuple[list[str], list[str], list[str], list[str]]  # (extract, scale, datapoint, metric)
+
+
+@dataclasses.dataclass
+class TransformCase:
+    """A test case for collector._transform."""
+
+    name: str
+    reason: str
+    mappings: list[mmv1alpha1.MetricMapping]
+    want: dict
+
+
+@dataclasses.dataclass
+class ObjectsCase:
+    """A test case for collector.objects."""
+
+    name: str
+    reason: str
+    cluster: str
+    mappings: list[mmv1alpha1.MetricMapping]
+    sinks: list[tdv1alpha1.Sink]
+    extensions: dict
+    want: list[tuple[str, dict, str | None]]
+
+
+@dataclasses.dataclass
+class ExportersCase:
+    """A test case for collector.exporters."""
+
+    name: str
+    reason: str
+    sinks: list[tdv1alpha1.Sink]
+    want: dict
+
+
+@dataclasses.dataclass
+class AuthenticatorsCase:
+    """A test case for collector.authenticators."""
+
+    name: str
+    reason: str
+    sinks: list[tdv1alpha1.Sink]
+    want: dict
+
+
+def _sink(*, name: str, type_: str, secret: str | None) -> tdv1alpha1.Sink:
+    """A sink exporting to otel.acme.example, with a bearer token read from secret if there is one."""
     return tdv1alpha1.Sink.model_validate(
         {
             "name": name,
@@ -40,374 +121,1088 @@ def _sink(name: str = "primary", type_: str = "otlphttp", secret: str | None = N
     )
 
 
-_SINKS = [_sink()]
+# This builds CONFIG_CASES' whole want, which the helper rule forbids. The config
+# runs to nearly 300 lines, and the cases differ only in their exporters and
+# extensions, each a keyword argument here. Writing it out once per case would
+# hide the parts that vary. OBJECTS_CASES embeds the same config in the
+# collector's ConfigMap, which is the use the helper rule allows.
+def _config(
+    *, exporters: dict, pipeline_exporters: list[str], extensions: dict | None, service_extensions: list[str] | None
+) -> dict:
+    """The collector's config for prod-us-east with the built-in mappings, as the dict config dumps to YAML."""
+    service: dict = {
+        "pipelines": {
+            "metrics": {
+                "receivers": ["prometheus"],
+                # The renames run before groupbyattrs lifts the identity, while
+                # the datapoints are still where a statement matching on a
+                # metric's name can reach them.
+                "processors": [
+                    "memory_limiter",
+                    "resource/cluster",
+                    "transform/identity",
+                    "transform/modelplane",
+                    "groupbyattrs/identity",
+                    "filter/modelplane",
+                    "batch",
+                ],
+                "exporters": pipeline_exporters,
+            }
+        },
+    }
+    if service_extensions is not None:
+        # An authenticator the service doesn't list is one the collector won't
+        # load.
+        service["extensions"] = service_extensions
+    config: dict = {
+        "receivers": {
+            "prometheus": {
+                "config": {
+                    "scrape_configs": [
+                        {
+                            "job_name": "modelplane-engines",
+                            "scrape_interval": "15s",
+                            "kubernetes_sd_configs": [{"role": "pod"}],
+                            "relabel_configs": [
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_deployment"],
+                                    "action": "keep",
+                                    "regex": ".+",
+                                },
+                                # By name: matching by number would find the
+                                # pd-sidecar on a disaggregated pod.
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_container_port_name"],
+                                    "action": "keep",
+                                    "regex": "http",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_deployment"],
+                                    "target_label": "deployment",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_replica"],
+                                    "target_label": "replica",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_engine"],
+                                    "target_label": "engine",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_role"],
+                                    "target_label": "role",
+                                },
+                                {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
+                            ],
+                        },
+                        {
+                            "job_name": "modelplane-gateway",
+                            "scrape_interval": "15s",
+                            "kubernetes_sd_configs": [{"role": "pod"}],
+                            "relabel_configs": [
+                                {
+                                    "source_labels": [
+                                        "__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"
+                                    ],
+                                    "action": "keep",
+                                    "regex": ".+",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_container_port_name"],
+                                    "action": "keep",
+                                    "regex": "metrics",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_annotation_prometheus_io_path"],
+                                    "action": "replace",
+                                    "target_label": "__metrics_path__",
+                                    "regex": "(.+)",
+                                },
+                            ],
+                        },
+                        # A target of the gateway's own: its GenAI metrics are on
+                        # the ext-proc sidecar, not the proxy's port.
+                        {
+                            "job_name": "modelplane-gateway-genai",
+                            "scrape_interval": "15s",
+                            "kubernetes_sd_configs": [{"role": "pod"}],
+                            "relabel_configs": [
+                                {
+                                    "source_labels": [
+                                        "__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"
+                                    ],
+                                    "action": "keep",
+                                    "regex": ".+",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_container_port_name"],
+                                    "action": "keep",
+                                    "regex": "aigw-admin",
+                                },
+                            ],
+                        },
+                        {
+                            "job_name": "modelplane-gpu",
+                            "scrape_interval": "15s",
+                            "kubernetes_sd_configs": [{"role": "pod"}],
+                            "relabel_configs": [
+                                {
+                                    "source_labels": [
+                                        "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+                                        "__meta_kubernetes_pod_label_app",
+                                    ],
+                                    "action": "keep",
+                                    "regex": ".*dcgm.*",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_container_port_name"],
+                                    "action": "keep",
+                                    "regex": "metrics",
+                                },
+                                {"source_labels": ["__meta_kubernetes_pod_node_name"], "target_label": "node"},
+                            ],
+                        },
+                        {
+                            "job_name": "modelplane-substrate",
+                            "scrape_interval": "30s",
+                            "kubernetes_sd_configs": [{"role": "pod"}],
+                            "relabel_configs": [
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"],
+                                    "action": "keep",
+                                    "regex": "true",
+                                },
+                                # Every pod a job above keeps, dropped on the same
+                                # terms, so the jobs cover disjoint pods: a pod two
+                                # jobs both collect arrives twice, under two job
+                                # names.
+                                {
+                                    "source_labels": [
+                                        "__meta_kubernetes_pod_label_gateway_envoyproxy_io_owning_gateway_name"
+                                    ],
+                                    "action": "drop",
+                                    "regex": ".+",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_label_modelplane_ai_deployment"],
+                                    "action": "drop",
+                                    "regex": ".+",
+                                },
+                                {
+                                    "source_labels": [
+                                        "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+                                        "__meta_kubernetes_pod_label_app",
+                                    ],
+                                    "action": "drop",
+                                    "regex": ".*dcgm.*",
+                                },
+                                {
+                                    "source_labels": ["__meta_kubernetes_pod_annotation_prometheus_io_path"],
+                                    "action": "replace",
+                                    "target_label": "__metrics_path__",
+                                    "regex": "(.+)",
+                                },
+                                {
+                                    "source_labels": [
+                                        "__address__",
+                                        "__meta_kubernetes_pod_annotation_prometheus_io_port",
+                                    ],
+                                    "action": "replace",
+                                    "target_label": "__address__",
+                                    "regex": r"(\[.+\]|[^:]+)(?::\d+)?;(\d+)",
+                                    "replacement": "$1:$2",
+                                },
+                                {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
+                            ],
+                        },
+                    ]
+                }
+            }
+        },
+        "processors": {
+            # First in the pipeline: nothing bounds what one interval brings off
+            # a fleet of engines.
+            "memory_limiter": {"check_interval": "1s", "limit_percentage": 80, "spike_limit_percentage": 25},
+            # Stamped here, because one receiver downstream sees a merged stream
+            # and can't tell senders apart.
+            "resource/cluster": {"attributes": [{"key": "cluster", "value": "prod-us-east", "action": "upsert"}]},
+            # Only the identity survives to the exporter: discovery attaches the
+            # pod's name and uid, and neither is the deployment's. It includes
+            # service.instance.id because two producers whose series are
+            # identical are one series, and one is lost. OTTL quotes with double
+            # quotes, and the single ones a Python list renders stop the
+            # collector starting.
+            "transform/identity": {
+                "metric_statements": [
+                    {
+                        "context": "resource",
+                        "statements": [
+                            'keep_keys(resource.attributes, ["cluster", "deployment", "engine", "namespace", "node", "replica", "role", "service.instance.id", "service.name"])'
+                        ],
+                    }
+                ]
+            },
+            "transform/modelplane": {
+                "metric_statements": [
+                    # DCGM reports mJ and MiB, and the names say joules and bytes.
+                    # scale_metric converts a histogram's sum, bounds and buckets
+                    # where setting value_double would convert a gauge and leave a
+                    # histogram lying. It refuses an exponential histogram, which
+                    # under the default error mode fails the whole batch. A block
+                    # ahead of the renames rather than a line, because the
+                    # processor finishes a block over every metric before the next
+                    # one starts.
+                    {
+                        "context": "metric",
+                        "error_mode": "ignore",
+                        "statements": [
+                            'scale_metric(1048576.0) where metric.name == "DCGM_FI_DEV_FB_USED"',
+                            'scale_metric(0.001) where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
+                        ],
+                    },
+                    {
+                        "context": "metric",
+                        "statements": [
+                            'set(metric.name, "modelplane_frontend_request_duration_seconds") where metric.name == "gen_ai_server_request_duration_seconds"',
+                            'set(metric.name, "modelplane_frontend_ttft_seconds") where metric.name == "gen_ai_server_time_to_first_token_seconds"',
+                            'set(metric.name, "modelplane_frontend_tpot_seconds") where metric.name == "gen_ai_server_time_per_output_token_seconds"',
+                            'set(metric.name, "modelplane_request_ttft_seconds") where metric.name == "vllm:time_to_first_token_seconds"',
+                            'set(metric.name, "modelplane_request_duration_seconds") where metric.name == "vllm:e2e_request_latency_seconds"',
+                            'set(metric.name, "modelplane_request_queue_seconds") where metric.name == "vllm:request_queue_time_seconds"',
+                            'set(metric.name, "modelplane_request_prefill_seconds") where metric.name == "vllm:request_prefill_time_seconds"',
+                            'set(metric.name, "modelplane_request_decode_seconds") where metric.name == "vllm:request_decode_time_seconds"',
+                            'set(metric.name, "modelplane_request_input_tokens") where metric.name == "vllm:request_prompt_tokens"',
+                            'set(metric.name, "modelplane_request_output_tokens") where metric.name == "vllm:request_generation_tokens"',
+                            'set(metric.name, "modelplane_requests_running") where metric.name == "vllm:num_requests_running"',
+                            'set(metric.name, "modelplane_requests_waiting") where metric.name == "vllm:num_requests_waiting"',
+                            'set(metric.name, "modelplane_kv_cache_utilization_ratio") where metric.name == "vllm:kv_cache_usage_perc"',
+                            'set(metric.name, "modelplane_requests_preempted_total") where metric.name == "vllm:num_preemptions_total"',
+                            'set(metric.name, "modelplane_prefix_cache_hits_total") where metric.name == "vllm:prefix_cache_hits_total"',
+                            'set(metric.name, "modelplane_prefix_cache_lookups_total") where metric.name == "vllm:prefix_cache_queries_total"',
+                            'set(metric.name, "modelplane_requests_running") where metric.name == "sglang:num_running_reqs"',
+                            'set(metric.name, "modelplane_requests_waiting") where metric.name == "sglang:num_queue_reqs"',
+                            'set(metric.name, "modelplane_kv_cache_utilization_ratio") where metric.name == "sglang:token_usage"',
+                            'set(metric.name, "modelplane_request_input_tokens") where metric.name == "sglang:prompt_tokens_histogram"',
+                            'set(metric.name, "modelplane_request_output_tokens") where metric.name == "sglang:generation_tokens_histogram"',
+                            'set(metric.name, "modelplane_route_decision_seconds") where metric.name == "llm_d_epp_scheduler_e2e_duration_seconds"',
+                            'set(metric.name, "modelplane_gpu_memory_used_bytes") where metric.name == "DCGM_FI_DEV_FB_USED"',
+                            'set(metric.name, "modelplane_gpu_compute_active_ratio") where metric.name == "DCGM_FI_PROF_GR_ENGINE_ACTIVE"',
+                            'set(metric.name, "modelplane_gpu_tensor_active_ratio") where metric.name == "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"',
+                            'set(metric.name, "modelplane_gpu_memory_bandwidth_ratio") where metric.name == "DCGM_FI_PROF_DRAM_ACTIVE"',
+                            'set(metric.name, "modelplane_gpu_temperature_celsius") where metric.name == "DCGM_FI_DEV_GPU_TEMP"',
+                            'set(metric.name, "modelplane_gpu_power_watts") where metric.name == "DCGM_FI_DEV_POWER_USAGE"',
+                            'set(metric.name, "modelplane_energy_joules_total") where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
+                        ],
+                    },
+                ]
+            },
+            # Lifts the identity discovery wrote onto each datapoint onto the
+            # resource, where an exporter that flattens a series into labels
+            # reads it. Without it a series arrives carrying only the cluster.
+            "groupbyattrs/identity": {
+                "keys": [
+                    "cluster",
+                    "namespace",
+                    "deployment",
+                    "replica",
+                    "engine",
+                    "role",
+                    "node",
+                    "service.name",
+                    "service.instance.id",
+                ]
+            },
+            # Only modelplane_* leaves the cluster: a series the statements
+            # didn't rename is dropped.
+            "filter/modelplane": {"metrics": {"metric": ['not IsMatch(name, "^modelplane_.*")']}},
+            "batch": {"timeout": "10s"},
+        },
+        "exporters": exporters,
+        "service": service,
+    }
+    if extensions is not None:
+        config["extensions"] = extensions
+    return config
 
 
-def _metric_statements() -> list[str]:
-    """The rename statements, which are the last of the four blocks."""
-    return collector.statements(list(stacks.BUILTIN_MAPPINGS))[-1]
+def _service_account() -> dict:
+    """The collector's ServiceAccount."""
+    return {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": "modelplane-collector",
+            "namespace": "modelplane-system",
+            "labels": {"app.kubernetes.io/name": "modelplane-collector", "app.kubernetes.io/managed-by": "modelplane"},
+        },
+    }
 
 
-def _config(*, extensions: dict | None = None, sinks: list | None = None) -> dict:
-    return yaml.safe_load(
+def _cluster_role() -> dict:
+    """The collector's ClusterRole."""
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "metadata": {
+            "name": "modelplane-collector",
+            "labels": {"app.kubernetes.io/name": "modelplane-collector", "app.kubernetes.io/managed-by": "modelplane"},
+        },
+        # Read only: service discovery needs to list pods, and nothing needs to
+        # write.
+        "rules": [
+            {
+                "apiGroups": [""],
+                "resources": ["pods", "services", "endpoints", "nodes", "nodes/metrics"],
+                "verbs": ["get", "list", "watch"],
+            },
+            {"nonResourceURLs": ["/metrics"], "verbs": ["get"]},
+        ],
+    }
+
+
+def _cluster_role_binding() -> dict:
+    """The collector's ClusterRoleBinding."""
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "metadata": {
+            "name": "modelplane-collector",
+            "labels": {"app.kubernetes.io/name": "modelplane-collector", "app.kubernetes.io/managed-by": "modelplane"},
+        },
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "modelplane-collector"},
+        "subjects": [{"kind": "ServiceAccount", "name": "modelplane-collector", "namespace": "modelplane-system"}],
+    }
+
+
+def _config_map(*, config: dict) -> dict:
+    """The ConfigMap holding the collector's config, as YAML."""
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "modelplane-collector",
+            "namespace": "modelplane-system",
+            "labels": {"app.kubernetes.io/name": "modelplane-collector", "app.kubernetes.io/managed-by": "modelplane"},
+        },
+        "data": {"collector.yaml": yaml.safe_dump(config, sort_keys=False)},
+    }
+
+
+def _deployment(
+    *, config_hash: str, volumes: list[dict], volume_mounts: list[dict], env_from: list[dict] | None
+) -> dict:
+    """The collector's Deployment, restarted by its config's hash and mounting volumes."""
+    container: dict = {
+        "name": "collector",
+        "image": "otel/opentelemetry-collector-contrib:0.161.0",
+        "args": ["--config=/conf/collector.yaml"],
+        "volumeMounts": volume_mounts,
+        "resources": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"memory": "512Mi"}},
+    }
+    if env_from is not None:
+        container["envFrom"] = env_from
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "modelplane-collector",
+            "namespace": "modelplane-system",
+            "labels": {"app.kubernetes.io/name": "modelplane-collector", "app.kubernetes.io/managed-by": "modelplane"},
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app.kubernetes.io/name": "modelplane-collector"}},
+            "template": {
+                "metadata": {
+                    "labels": {"app.kubernetes.io/name": "modelplane-collector"},
+                    "annotations": {"modelplane.ai/config-hash": config_hash},
+                },
+                "spec": {
+                    "serviceAccountName": "modelplane-collector",
+                    "containers": [container],
+                    "volumes": volumes,
+                },
+            },
+        },
+    }
+
+
+# Every case renders the built-in mappings, read from the stacks package rather
+# than written as literals, because fn.py always renders them and so every real
+# config carries them. None of these cases is about them: BuiltIn in
+# STATEMENTS_CASES pins what they compile to. The cost is that changing a
+# built-in changes _config's transform/modelplane block too.
+CONFIG_CASES = [
+    ConfigCase(
+        name="OneSink",
+        reason=(
+            "With one sink and one extension, the collector exports the built-in mappings' series to the sink, "
+            "stamped with the cluster, and loads the extension."
+        ),
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="otlphttp", secret=None)],
+        # A client authenticator: an exporter needs one of those, not the oidc
+        # extension, which authenticates callers of a receiver.
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=_config(
+            exporters={"otlphttp/primary": {"endpoint": "https://otel.acme.example"}},
+            pipeline_exporters=["otlphttp/primary"],
+            extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+            service_extensions=["oauth2client/acme"],
+        ),
+    ),
+    ConfigCase(
+        name="NoExtensions",
+        reason="With no extensions, the config declares none, to the service or at the top level.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="otlphttp", secret=None)],
+        extensions={},
+        want=_config(
+            exporters={"otlphttp/primary": {"endpoint": "https://otel.acme.example"}},
+            pipeline_exporters=["otlphttp/primary"],
+            extensions=None,
+            service_extensions=None,
+        ),
+    ),
+    # The remote-write exporter registers as prometheus_remote_write in 0.161.0
+    # and still answers to the older prometheusremotewrite. A sink writing the
+    # one the collector's own documentation gives would otherwise match no
+    # default and export every series stripped of the cluster, deployment,
+    # engine and role it belongs to - silently, because the sink itself works.
+    ConfigCase(
+        name="RemoteWrite",
+        reason="A prometheus_remote_write sink carries each series' resource attributes as labels.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="prometheus_remote_write", secret=None)],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=_config(
+            exporters={
+                "prometheus_remote_write/primary": {
+                    "resource_to_telemetry_conversion": {"enabled": True},
+                    "endpoint": "https://otel.acme.example",
+                }
+            },
+            pipeline_exporters=["prometheus_remote_write/primary"],
+            extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+            service_extensions=["oauth2client/acme"],
+        ),
+    ),
+    ConfigCase(
+        name="RemoteWriteOldName",
+        reason="A prometheusremotewrite sink carries each series' resource attributes as labels.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="prometheusremotewrite", secret=None)],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=_config(
+            exporters={
+                "prometheusremotewrite/primary": {
+                    "resource_to_telemetry_conversion": {"enabled": True},
+                    "endpoint": "https://otel.acme.example",
+                }
+            },
+            pipeline_exporters=["prometheusremotewrite/primary"],
+            extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+            service_extensions=["oauth2client/acme"],
+        ),
+    ),
+    ConfigCase(
+        name="Prometheus",
+        reason="A prometheus sink carries each series' resource attributes as labels.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="prometheus", secret=None)],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=_config(
+            exporters={
+                "prometheus/primary": {
+                    "resource_to_telemetry_conversion": {"enabled": True},
+                    "endpoint": "https://otel.acme.example",
+                }
+            },
+            pipeline_exporters=["prometheus/primary"],
+            extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+            service_extensions=["oauth2client/acme"],
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("case", CONFIG_CASES, ids=lambda case: case.name)
+def test_config(case: ConfigCase) -> None:
+    """config renders the collector's whole configuration."""
+    got = collector.config(case.cluster, case.mappings, case.sinks, case.extensions)
+    # The cases write the config as the dict the function dumps, in the order
+    # it builds it, so they read as config rather than as wrapped YAML. PyYAML
+    # dumps it on both sides.
+    assert got == yaml.safe_dump(case.want, sort_keys=False), case.reason
+
+
+PORT_REWRITE_CASES = [
+    PortRewriteCase(
+        name="IPv4",
+        reason="An IPv4 pod's address moves onto its annotated port.",
+        address="10.1.0.5:8000",
+        want="10.1.0.5:9402",
+    ),
+    PortRewriteCase(
+        name="IPv6",
+        reason="An IPv6 pod's bracketed address, which [^:]+ never matches, moves onto its annotated port.",
+        address="[2001:db8::1]:9090",
+        want="[2001:db8::1]:9402",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", PORT_REWRITE_CASES, ids=lambda case: case.name)
+def test_port_rewrite(case: PortRewriteCase) -> None:
+    """The substrate job rewrites a pod's address onto the port it annotates."""
+    # This checks what the rewrite does to an address, which comparing the
+    # config can't, so it picks the one rule out of a rendered config. The
+    # config renders the built-in mappings, read from the stacks package, as
+    # fn.py always does, though the rule doesn't depend on them.
+    config = yaml.safe_load(
         collector.config(
             "prod-us-east",
             list(stacks.BUILTIN_MAPPINGS),
-            _SINKS if sinks is None else sinks,
-            _EXTENSIONS if extensions is None else extensions,
+            [_sink(name="primary", type_="otlphttp", secret=None)],
+            {"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
         )
     )
-
-
-def _objects(secret: str | None = None) -> dict:
-    sinks = [_sink(secret=secret)] if secret else _SINKS
-    return {k: m for k, m, _ in collector.objects("prod-us-east", list(stacks.BUILTIN_MAPPINGS), sinks, _EXTENSIONS)}
-
-
-def test_pipeline_order() -> None:
-    """The rename runs before the identity is lifted onto the resource.
-
-    Discovery writes the identity onto each datapoint and groupbyattrs
-    lifts it; a statement matching on a metric's name has to run while the
-    datapoints are still where the rename can reach them.
-    """
-    procs = _config()["service"]["pipelines"]["metrics"]["processors"]
-    assert procs.index("transform/modelplane") < procs.index("groupbyattrs/identity")
-    assert procs[-1] == "batch"
-
-
-def test_only_modelplane_leaves_the_cluster() -> None:
-    """A series the statements didn't rename is dropped."""
-    assert "filter/modelplane" in _config()["processors"]
-    assert "filter/modelplane" in _config()["service"]["pipelines"]["metrics"]["processors"]
-
-
-def test_cluster_is_stamped_here() -> None:
-    """One receiver downstream sees a merged stream and can't tell senders apart."""
-    attrs = _config()["processors"]["resource/cluster"]["attributes"]
-    assert attrs == [{"key": "cluster", "value": "prod-us-east", "action": "upsert"}]
-
-
-def test_the_jobs_cover_disjoint_pods() -> None:
-    """A pod two jobs both collect arrives twice, under two job names."""
-    jobs = {
-        j["job_name"]: j["relabel_configs"] for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]
-    }
-    substrate = jobs["modelplane-substrate"]
-
-    def predicate(rules: list[dict], action: str) -> set[tuple]:
-        return {(tuple(r["source_labels"]), r["regex"]) for r in rules if r.get("action") == action}
-
-    # Everything another job keeps, the substrate job drops on the same terms.
-    for job in ("modelplane-engines", "modelplane-gateway", "modelplane-gpu"):
-        for kept in predicate(jobs[job], "keep"):
-            if kept[0] == ("__meta_kubernetes_pod_container_port_name",):
-                continue  # a port filter, not a pod filter
-            assert kept in predicate(substrate, "drop"), f"{job} keeps {kept}, substrate does not drop it"
-
-
-def test_only_the_identity_survives_to_the_exporter() -> None:
-    """Discovery attaches the pod's name and uid; neither is the deployment's."""
-    blocks = _config()["processors"]["transform/identity"]["metric_statements"]
-    statement = blocks[0]["statements"][0]
-    # OTTL quotes with double quotes. A Python list renders single ones and
-    # the collector refuses to start, which a unit test on shape won't catch.
-    assert "'" not in statement
-    assert 'keep_keys(resource.attributes, ["cluster"' in statement
-    pipeline = _config()["service"]["pipelines"]["metrics"]["processors"]
-    assert pipeline.index("transform/identity") < pipeline.index("groupbyattrs/identity")
-
-
-def test_the_identity_is_lifted_onto_the_resource() -> None:
-    """Without this a series arrives carrying only the cluster.
-
-    Discovery writes the identity onto each datapoint. An exporter that
-    flattens a series into labels reads the resource, so something has to
-    move it, and this is the only processor that does. Removing it as a
-    no-op strips every series of what says who it belongs to - verified on
-    a cluster, where the resource came back carrying `cluster` alone.
-    """
-    cfg = _config()
-    assert cfg["processors"]["groupbyattrs/identity"]["keys"] == list(collector._IDENTITY)
-    assert "groupbyattrs/identity" in cfg["service"]["pipelines"]["metrics"]["processors"]
-
-
-def test_a_part_is_extracted_before_anything_selects_on_it() -> None:
-    """A label or a unit for an extracted part names a metric that must exist.
-
-    The extraction mints `<name>_count`, and a datapoint statement for it
-    selects on that name. Run the datapoint block first and it matches
-    nothing, silently.
-    """
-    mapping = mmv1alpha1.MetricMapping.model_validate(
-        {
-            "spec": {
-                "metrics": [
-                    {
-                        "from": "my_engine_duration_ms",
-                        "to": "modelplane_requests_total",
-                        "part": "Count",
-                        "fromUnit": "Milliseconds",
-                        "labels": [{"name": "status", "value": "ok"}],
-                    }
-                ]
-            }
-        }
-    )
-    blocks = collector._transform([mapping])["metric_statements"]
-    contexts = [b["context"] for b in blocks]
-    assert contexts == ["metric", "metric", "datapoint", "metric"]
-    assert "extract_count_metric" in blocks[0]["statements"][0]
-    # Everything selecting on the extracted name comes after the extraction.
-    for block in blocks[1:]:
-        for statement in block["statements"]:
-            assert "my_engine_duration_ms_count" in statement
-
-
-def test_every_job_carries_something_unique_to_its_target() -> None:
-    """Two producers whose series are identical are one series, and one is lost.
-
-    The modelplane identity names an engine and nothing else: a gateway pod
-    carries none of it, two replicas of a substrate controller share a
-    namespace, and a ModelReplica with copies > 1 runs several pods under
-    one replica index.
-    """
-    assert "service.instance.id" in collector._IDENTITY
-    statement = _config()["processors"]["transform/identity"]["metric_statements"][0]["statements"][0]
-    assert '"service.instance.id"' in statement
-
-
-def test_a_scrape_spike_cannot_take_the_collector_down() -> None:
-    """Nothing bounds what one interval brings off a fleet of engines."""
-    cfg = _config()
-    assert "memory_limiter" in cfg["processors"]
-    assert cfg["service"]["pipelines"]["metrics"]["processors"][0] == "memory_limiter"
-
-
-def test_the_port_rewrite_matches_an_ipv6_pod() -> None:
-    """__address__ is [2001:db8::1]:9090 there, which [^:]+ never matches."""
     rule = next(
         r
-        for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]
+        for j in config["receivers"]["prometheus"]["config"]["scrape_configs"]
         if j["job_name"] == "modelplane-substrate"
         for r in j["relabel_configs"]
         if r.get("target_label") == "__address__"
     )
-    for address in ("10.1.0.5:8000", "[2001:db8::1]:9090"):
-        matched = re.fullmatch(rule["regex"], f"{address};9402")
-        assert matched is not None, address
-        assert matched.expand(r"\1:\2").endswith(":9402")
+    matched = re.fullmatch(rule["regex"], f"{case.address};9402")
+    got = matched.expand(r"\1:\2") if matched else None
+    assert got == case.want, case.reason
 
 
-def test_engine_scrape_selects_the_port_by_name() -> None:
-    """Matching by number would find the pd-sidecar on a disaggregated pod."""
-    jobs = {j["job_name"]: j for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]}
-    keeps = [r for r in jobs["modelplane-engines"]["relabel_configs"] if r.get("action") == "keep"]
-    assert "__meta_kubernetes_pod_container_port_name" in [k["source_labels"][0] for k in keeps]
+STATEMENTS_CASES = [
+    # The built-in mappings, read from the stacks package rather than restated,
+    # because what the collector compiles them to is what this case pins.
+    StatementsCase(
+        name="BuiltIn",
+        reason="The built-in mappings convert DCGM's units, then rename every series they map.",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        want=(
+            [],
+            [
+                'scale_metric(1048576.0) where metric.name == "DCGM_FI_DEV_FB_USED"',
+                'scale_metric(0.001) where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
+            ],
+            [],
+            [
+                'set(metric.name, "modelplane_frontend_request_duration_seconds") where metric.name == "gen_ai_server_request_duration_seconds"',
+                'set(metric.name, "modelplane_frontend_ttft_seconds") where metric.name == "gen_ai_server_time_to_first_token_seconds"',
+                'set(metric.name, "modelplane_frontend_tpot_seconds") where metric.name == "gen_ai_server_time_per_output_token_seconds"',
+                'set(metric.name, "modelplane_request_ttft_seconds") where metric.name == "vllm:time_to_first_token_seconds"',
+                'set(metric.name, "modelplane_request_duration_seconds") where metric.name == "vllm:e2e_request_latency_seconds"',
+                'set(metric.name, "modelplane_request_queue_seconds") where metric.name == "vllm:request_queue_time_seconds"',
+                'set(metric.name, "modelplane_request_prefill_seconds") where metric.name == "vllm:request_prefill_time_seconds"',
+                'set(metric.name, "modelplane_request_decode_seconds") where metric.name == "vllm:request_decode_time_seconds"',
+                'set(metric.name, "modelplane_request_input_tokens") where metric.name == "vllm:request_prompt_tokens"',
+                'set(metric.name, "modelplane_request_output_tokens") where metric.name == "vllm:request_generation_tokens"',
+                'set(metric.name, "modelplane_requests_running") where metric.name == "vllm:num_requests_running"',
+                'set(metric.name, "modelplane_requests_waiting") where metric.name == "vllm:num_requests_waiting"',
+                'set(metric.name, "modelplane_kv_cache_utilization_ratio") where metric.name == "vllm:kv_cache_usage_perc"',
+                'set(metric.name, "modelplane_requests_preempted_total") where metric.name == "vllm:num_preemptions_total"',
+                'set(metric.name, "modelplane_prefix_cache_hits_total") where metric.name == "vllm:prefix_cache_hits_total"',
+                'set(metric.name, "modelplane_prefix_cache_lookups_total") where metric.name == "vllm:prefix_cache_queries_total"',
+                # Not SGLang's latency histograms, sglang:time_to_first_token_seconds
+                # and sglang:inter_token_latency: their buckets resolve to 100ms
+                # where vLLM's resolve to 1ms.
+                'set(metric.name, "modelplane_requests_running") where metric.name == "sglang:num_running_reqs"',
+                'set(metric.name, "modelplane_requests_waiting") where metric.name == "sglang:num_queue_reqs"',
+                'set(metric.name, "modelplane_kv_cache_utilization_ratio") where metric.name == "sglang:token_usage"',
+                'set(metric.name, "modelplane_request_input_tokens") where metric.name == "sglang:prompt_tokens_histogram"',
+                'set(metric.name, "modelplane_request_output_tokens") where metric.name == "sglang:generation_tokens_histogram"',
+                'set(metric.name, "modelplane_route_decision_seconds") where metric.name == "llm_d_epp_scheduler_e2e_duration_seconds"',
+                'set(metric.name, "modelplane_gpu_memory_used_bytes") where metric.name == "DCGM_FI_DEV_FB_USED"',
+                'set(metric.name, "modelplane_gpu_compute_active_ratio") where metric.name == "DCGM_FI_PROF_GR_ENGINE_ACTIVE"',
+                'set(metric.name, "modelplane_gpu_tensor_active_ratio") where metric.name == "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"',
+                'set(metric.name, "modelplane_gpu_memory_bandwidth_ratio") where metric.name == "DCGM_FI_PROF_DRAM_ACTIVE"',
+                'set(metric.name, "modelplane_gpu_temperature_celsius") where metric.name == "DCGM_FI_DEV_GPU_TEMP"',
+                'set(metric.name, "modelplane_gpu_power_watts") where metric.name == "DCGM_FI_DEV_POWER_USAGE"',
+                'set(metric.name, "modelplane_energy_joules_total") where metric.name == "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"',
+            ],
+        ),
+    ),
+    # vLLM and SGLang both publish a fraction, so no built-in needs this, but
+    # vLLM's is called kv_cache_usage_perc: the name is no guide, and an engine
+    # that means it has to be able to say so.
+    StatementsCase(
+        name="Percent",
+        reason="A metric counted in percent is scaled by 0.01 into the ratio its new name claims.",
+        mappings=[
+            mmv1alpha1.MetricMapping.model_validate(
+                {
+                    "spec": {
+                        "metrics": [
+                            {
+                                "from": "my_engine_cache_percent",
+                                "to": "modelplane_kv_cache_utilization_ratio",
+                                "fromUnit": "Percent",
+                            }
+                        ]
+                    }
+                }
+            )
+        ],
+        want=(
+            [],
+            ['scale_metric(0.01) where metric.name == "my_engine_cache_percent"'],
+            [],
+            [
+                'set(metric.name, "modelplane_kv_cache_utilization_ratio") where metric.name == "my_engine_cache_percent"'
+            ],
+        ),
+    ),
+    # `from` is pattern-constrained, but a label's value can't be: a value and
+    # a `values` remap carry whatever vocabulary the component already writes,
+    # so the schema has to take free text. An unescaped quote would close the
+    # OTTL literal early and leave the rest of the value as OTTL.
+    StatementsCase(
+        name="QuotedLabelValue",
+        reason="A quote in a remapped label value is escaped, so it can't end the OTTL string it sits in.",
+        mappings=[
+            mmv1alpha1.MetricMapping.model_validate(
+                {
+                    "spec": {
+                        "metrics": [
+                            {
+                                "from": "my_engine_finish",
+                                "to": "modelplane_requests_total",
+                                "labels": [{"name": "reason", "from": "finish", "values": {'ab"c': 'x"y'}}],
+                            }
+                        ]
+                    }
+                }
+            )
+        ],
+        want=(
+            [],
+            [],
+            [
+                'set(datapoint.attributes["reason"], datapoint.attributes["finish"]) where metric.name == "my_engine_finish"',
+                r'set(datapoint.attributes["reason"], "x\"y") where metric.name == "my_engine_finish" and datapoint.attributes["finish"] == "ab\"c"',
+                'delete_key(datapoint.attributes, "finish") where metric.name == "my_engine_finish"',
+            ],
+            ['set(metric.name, "modelplane_requests_total") where metric.name == "my_engine_finish"'],
+        ),
+    ),
+    # A label carried onto its own name is how a mapping remaps values in place.
+    # The delete that stops a carried label costing twice the cardinality would
+    # take the label the statements before it just set.
+    StatementsCase(
+        name="LabelOntoItself",
+        reason="A label carried onto its own name has its values remapped and isn't deleted afterwards.",
+        mappings=[
+            mmv1alpha1.MetricMapping.model_validate(
+                {
+                    "spec": {
+                        "metrics": [
+                            {
+                                "from": "my_engine_finish",
+                                "to": "modelplane_requests_total",
+                                "labels": [{"name": "reason", "from": "reason", "values": {"eos": "stop"}}],
+                            }
+                        ]
+                    }
+                }
+            )
+        ],
+        want=(
+            [],
+            [],
+            [
+                'set(datapoint.attributes["reason"], datapoint.attributes["reason"]) where metric.name == "my_engine_finish"',
+                'set(datapoint.attributes["reason"], "stop") where metric.name == "my_engine_finish" and datapoint.attributes["reason"] == "eos"',
+            ],
+            ['set(metric.name, "modelplane_requests_total") where metric.name == "my_engine_finish"'],
+        ),
+    ),
+]
 
 
-def test_gateway_has_a_target_of_its_own() -> None:
-    """Its GenAI metrics are on the ext-proc sidecar, not the proxy's port."""
-    jobs = [j["job_name"] for j in _config()["receivers"]["prometheus"]["config"]["scrape_configs"]]
-    assert "modelplane-gateway" in jobs
+@pytest.mark.parametrize("case", STATEMENTS_CASES, ids=lambda case: case.name)
+def test_statements(case: StatementsCase) -> None:
+    """statements compiles the mappings to OTTL extract, scale, datapoint and metric statements."""
+    got = collector.statements(case.mappings)
+    assert got == case.want, case.reason
 
 
-@pytest.mark.parametrize("type_", ["prometheus_remote_write", "prometheusremotewrite", "prometheus"])
-def test_both_spellings_of_remote_write_keep_their_identity(type_: str) -> None:
-    """The exporter registers as prometheus_remote_write in 0.161.0.
+TRANSFORM_CASES = [
+    # The extraction mints my_engine_duration_ms_count, and the conversion, the
+    # label and the rename all select on that name. Run any of them first and it
+    # matches nothing, silently.
+    TransformCase(
+        name="ExtractedPart",
+        reason="A histogram part is extracted in a block ahead of everything that selects on its name.",
+        mappings=[
+            mmv1alpha1.MetricMapping.model_validate(
+                {
+                    "spec": {
+                        "metrics": [
+                            {
+                                "from": "my_engine_duration_ms",
+                                "to": "modelplane_requests_total",
+                                "part": "Count",
+                                "fromUnit": "Milliseconds",
+                                "labels": [{"name": "status", "value": "ok"}],
+                            }
+                        ]
+                    }
+                }
+            )
+        ],
+        want={
+            "metric_statements": [
+                {
+                    "context": "metric",
+                    "statements": ['extract_count_metric(true) where metric.name == "my_engine_duration_ms"'],
+                },
+                {
+                    "context": "metric",
+                    "error_mode": "ignore",
+                    "statements": ['scale_metric(0.001) where metric.name == "my_engine_duration_ms_count"'],
+                },
+                {
+                    "context": "datapoint",
+                    "statements": [
+                        'set(datapoint.attributes["status"], "ok") where metric.name == "my_engine_duration_ms_count"'
+                    ],
+                },
+                {
+                    "context": "metric",
+                    "statements": [
+                        'set(metric.name, "modelplane_requests_total") where metric.name == "my_engine_duration_ms_count"'
+                    ],
+                },
+            ]
+        },
+    ),
+]
 
-    prometheusremotewrite is the older name it still answers to. A sink
-    writing the one the collector's own documentation gives would
-    otherwise match no default here and export every series stripped of
-    the cluster, deployment, engine and role it belongs to - silently,
-    because the sink itself works.
-    """
-    exporters = _config(sinks=[_sink(type_=type_)])["exporters"]
-    exporter = next(v for k, v in exporters.items() if k.startswith(f"{type_}/"))
-    assert exporter["resource_to_telemetry_conversion"]["enabled"]
+
+@pytest.mark.parametrize("case", TRANSFORM_CASES, ids=lambda case: case.name)
+def test_transform(case: TransformCase) -> None:
+    """_transform orders the mappings' statements into the blocks the transform processor runs."""
+    got = collector._transform(case.mappings)
+    assert got == case.want, case.reason
 
 
-def test_extensions_are_declared_to_the_service() -> None:
-    """An authenticator the service doesn't list is one the collector won't load."""
-    assert _config()["service"]["extensions"] == ["oauth2client/acme"]
-    assert "extensions" not in _config(extensions={})["service"]
+# Every case renders the built-in mappings, read from the stacks package, for
+# the reason CONFIG_CASES gives. The config hashes are of a config that carries
+# them, so changing a built-in changes every hash here too.
+OBJECTS_CASES = [
+    # The config hash is a literal, so it pins one computed in another process:
+    # hash() is seeded per process, and would redeploy the collector on every
+    # reconcile.
+    ObjectsCase(
+        name="NoSecret",
+        reason="A sink with no Secret gets a collector that mounts only its config.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="otlphttp", secret=None)],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=[
+            ("collector-serviceaccount", _service_account(), None),
+            ("collector-clusterrole", _cluster_role(), None),
+            ("collector-clusterrolebinding", _cluster_role_binding(), None),
+            (
+                "collector-config",
+                _config_map(
+                    config=_config(
+                        exporters={"otlphttp/primary": {"endpoint": "https://otel.acme.example"}},
+                        pipeline_exporters=["otlphttp/primary"],
+                        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+                        service_extensions=["oauth2client/acme"],
+                    )
+                ),
+                None,
+            ),
+            (
+                "collector",
+                _deployment(
+                    config_hash="ad2c3f990baaeb4c",
+                    volumes=[{"name": "config", "configMap": {"name": "modelplane-collector"}}],
+                    volume_mounts=[{"name": "config", "mountPath": "/conf"}],
+                    env_from=None,
+                ),
+                "object.status.readyReplicas > 0",
+            ),
+        ],
+    ),
+    # Mounted as a file as well as the environment, because a rotated token in
+    # an environment variable needs a restart to be read.
+    ObjectsCase(
+        name="Secret",
+        reason="A sink's Secret mounts as a file under the sink's own directory and as environment variables.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[_sink(name="primary", type_="otlphttp", secret="telemetry-credentials")],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=[
+            ("collector-serviceaccount", _service_account(), None),
+            ("collector-clusterrole", _cluster_role(), None),
+            ("collector-clusterrolebinding", _cluster_role_binding(), None),
+            (
+                "collector-config",
+                _config_map(
+                    config=_config(
+                        exporters={
+                            "otlphttp/primary": {
+                                "endpoint": "https://otel.acme.example",
+                                "auth": {"authenticator": "bearertokenauth/primary"},
+                            }
+                        },
+                        pipeline_exporters=["otlphttp/primary"],
+                        extensions={
+                            "oauth2client/acme": {"token_url": "https://issuer.acme.example/token"},
+                            "bearertokenauth/primary": {"filename": "/etc/modelplane/telemetry/primary/token"},
+                        },
+                        service_extensions=["bearertokenauth/primary", "oauth2client/acme"],
+                    )
+                ),
+                None,
+            ),
+            (
+                "collector",
+                _deployment(
+                    config_hash="9f072b028dc68ea5",
+                    volumes=[
+                        {"name": "config", "configMap": {"name": "modelplane-collector"}},
+                        {"name": "credentials-primary", "secret": {"secretName": "telemetry-credentials"}},
+                    ],
+                    volume_mounts=[
+                        {"name": "config", "mountPath": "/conf"},
+                        {
+                            "name": "credentials-primary",
+                            "mountPath": "/etc/modelplane/telemetry/primary",
+                            "readOnly": True,
+                        },
+                    ],
+                    env_from=[{"secretRef": {"name": "telemetry-credentials"}}],
+                ),
+                "object.status.readyReplicas > 0",
+            ),
+        ],
+    ),
+    # Two sinks can both hold a key called token, and neither reads the other's.
+    ObjectsCase(
+        name="TwoSecrets",
+        reason="Two sinks' Secrets mount under a directory each.",
+        cluster="prod-us-east",
+        mappings=list(stacks.BUILTIN_MAPPINGS),
+        sinks=[
+            _sink(name="vendor", type_="otlphttp", secret="vendor-token"),
+            _sink(name="prometheus", type_="prometheusremotewrite", secret="prom-token"),
+        ],
+        extensions={"oauth2client/acme": {"token_url": "https://issuer.acme.example/token"}},
+        want=[
+            ("collector-serviceaccount", _service_account(), None),
+            ("collector-clusterrole", _cluster_role(), None),
+            ("collector-clusterrolebinding", _cluster_role_binding(), None),
+            (
+                "collector-config",
+                _config_map(
+                    config=_config(
+                        exporters={
+                            "otlphttp/vendor": {
+                                "endpoint": "https://otel.acme.example",
+                                "auth": {"authenticator": "bearertokenauth/vendor"},
+                            },
+                            "prometheusremotewrite/prometheus": {
+                                "resource_to_telemetry_conversion": {"enabled": True},
+                                "endpoint": "https://otel.acme.example",
+                                "auth": {"authenticator": "bearertokenauth/prometheus"},
+                            },
+                        },
+                        pipeline_exporters=["otlphttp/vendor", "prometheusremotewrite/prometheus"],
+                        extensions={
+                            "oauth2client/acme": {"token_url": "https://issuer.acme.example/token"},
+                            "bearertokenauth/vendor": {"filename": "/etc/modelplane/telemetry/vendor/token"},
+                            "bearertokenauth/prometheus": {"filename": "/etc/modelplane/telemetry/prometheus/token"},
+                        },
+                        service_extensions=[
+                            "bearertokenauth/prometheus",
+                            "bearertokenauth/vendor",
+                            "oauth2client/acme",
+                        ],
+                    )
+                ),
+                None,
+            ),
+            (
+                "collector",
+                _deployment(
+                    config_hash="176c01ff260e4716",
+                    volumes=[
+                        {"name": "config", "configMap": {"name": "modelplane-collector"}},
+                        {"name": "credentials-vendor", "secret": {"secretName": "vendor-token"}},
+                        {"name": "credentials-prometheus", "secret": {"secretName": "prom-token"}},
+                    ],
+                    volume_mounts=[
+                        {"name": "config", "mountPath": "/conf"},
+                        {
+                            "name": "credentials-vendor",
+                            "mountPath": "/etc/modelplane/telemetry/vendor",
+                            "readOnly": True,
+                        },
+                        {
+                            "name": "credentials-prometheus",
+                            "mountPath": "/etc/modelplane/telemetry/prometheus",
+                            "readOnly": True,
+                        },
+                    ],
+                    env_from=[{"secretRef": {"name": "vendor-token"}}, {"secretRef": {"name": "prom-token"}}],
+                ),
+                "object.status.readyReplicas > 0",
+            ),
+        ],
+    ),
+]
 
 
-def test_energy_is_scaled_before_it_is_renamed() -> None:
-    """DCGM counts millijoules, and the name says joules.
-
-    The scale is a block ahead of the renames, not a line ahead. The
-    processor finishes a block over every metric before the next one
-    starts, so a rename sharing the block would strand every metric
-    after the first at millijoules.
-    """
-    blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-    assert [b["context"] for b in blocks] == ["metric", "metric"]
-    assert any("scale_metric(0.001)" in st for st in blocks[0]["statements"])
-    assert any("modelplane_energy_joules_total" in st for st in blocks[-1]["statements"])
+@pytest.mark.parametrize("case", OBJECTS_CASES, ids=lambda case: case.name)
+def test_objects(case: ObjectsCase) -> None:
+    """objects composes the collector's manifests and their readiness queries."""
+    got = collector.objects(case.cluster, case.mappings, case.sinks, case.extensions)
+    assert got == case.want, case.reason
 
 
-def test_a_conversion_reaches_a_histogram_bucket() -> None:
-    """Setting value_double converts a gauge and leaves a histogram lying.
+EXPORTERS_CASES = [
+    # The collector names a second instance of a component <type>/<name>.
+    ExportersCase(
+        name="TwoOfOneType",
+        reason="Two sinks of one type render as two exporters, each named for its sink.",
+        sinks=[
+            _sink(name="a", type_="otlphttp", secret=None),
+            _sink(name="b", type_="otlphttp", secret=None),
+        ],
+        want={
+            "otlphttp/a": {"endpoint": "https://otel.acme.example"},
+            "otlphttp/b": {"endpoint": "https://otel.acme.example"},
+        },
+    ),
+    ExportersCase(
+        name="NoEndpoint",
+        reason="A sink that addresses its destination another way, by brokers or not at all, renders no endpoint.",
+        sinks=[
+            tdv1alpha1.Sink.model_validate(
+                {"name": "bus", "type": "kafka", "config": {"brokers": ["kafka.acme.example:9092"]}}
+            ),
+            tdv1alpha1.Sink.model_validate({"name": "seen", "type": "debug"}),
+        ],
+        want={"kafka/bus": {"brokers": ["kafka.acme.example:9092"]}, "debug/seen": {}},
+    ),
+    # The collector carries no credential on an exporter, only a reference to
+    # the authenticator AUTHENTICATORS_CASES composes.
+    ExportersCase(
+        name="Auth",
+        reason="A sink with auth references the authenticator composed for it.",
+        sinks=[_sink(name="primary", type_="otlphttp", secret="telemetry-credentials")],
+        want={
+            "otlphttp/primary": {
+                "endpoint": "https://otel.acme.example",
+                "auth": {"authenticator": "bearertokenauth/primary"},
+            }
+        },
+    ),
+    # The endpoint is Modelplane's, and goes on after the operator's config.
+    ExportersCase(
+        name="ConfigEndpoint",
+        reason="An endpoint in a sink's own config can't redirect it, though the rest of that config applies.",
+        sinks=[
+            tdv1alpha1.Sink.model_validate(
+                {
+                    "name": "primary",
+                    "type": "otlphttp",
+                    "endpoint": "https://otel.acme.example",
+                    "config": {"endpoint": "https://elsewhere.example", "compression": "gzip"},
+                }
+            )
+        ],
+        want={"otlphttp/primary": {"endpoint": "https://otel.acme.example", "compression": "gzip"}},
+    ),
+]
 
-    A histogram holds its measurements in its sum, its minimum and maximum
-    and every bucket boundary, none of which is value_double. Renaming one
-    to seconds with its buckets still at milliseconds puts every quantile
-    a thousand times out, and nothing says so.
-    """
-    blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-    for block in blocks:
-        for statement in block["statements"]:
-            assert "value_double" not in statement
-    scales = next(b for b in blocks if any("scale_metric" in st for st in b["statements"]))
-    assert scales["context"] == "metric"
+
+@pytest.mark.parametrize("case", EXPORTERS_CASES, ids=lambda case: case.name)
+def test_exporters(case: ExportersCase) -> None:
+    """exporters renders each sink as a collector exporter."""
+    got = collector.exporters(case.sinks)
+    assert got == case.want, case.reason
 
 
-def test_every_conversion_factor_is_a_float_literal() -> None:
-    """scale_metric takes a float, and 1048576 is an integer to OTTL.
+AUTHENTICATORS_CASES = [
+    AuthenticatorsCase(
+        name="BearerToken",
+        reason="A sink with a bearer token key gets an authenticator reading the token from its mounted Secret.",
+        sinks=[_sink(name="primary", type_="otlphttp", secret="telemetry-credentials")],
+        want={"bearertokenauth/primary": {"filename": "/etc/modelplane/telemetry/primary/token"}},
+    ),
+]
 
-    The collector refuses to start on it - "must be a float" - which
-    takes the whole cluster's telemetry down, and nothing short of
-    running the collector catches it.
-    """
-    for unit, factor in collector._UNIT_FACTOR.items():
-        assert "." in factor, f"{unit}: an OTTL float literal needs a decimal point"
+
+@pytest.mark.parametrize("case", AUTHENTICATORS_CASES, ids=lambda case: case.name)
+def test_authenticators(case: AuthenticatorsCase) -> None:
+    """authenticators composes an extension for each sink that asks for auth."""
+    got = collector.authenticators(case.sinks)
+    assert got == case.want, case.reason
+
+
+def test_unit_factors() -> None:
+    """Every unit conversion factor is an OTTL float literal."""
+    # scale_metric takes a float, and 1048576 is an integer to OTTL. The
+    # collector refuses to start on it - "must be a float" - which takes the
+    # whole cluster's telemetry down, and nothing short of running the
+    # collector catches it.
+    not_floats = [unit for unit, factor in collector._UNIT_FACTOR.items() if "." not in factor]
+    assert not_floats == [], "an OTTL float literal needs a decimal point"
+    for factor in collector._UNIT_FACTOR.values():
         float(factor)
 
 
-def test_a_conversion_cannot_drop_the_batch_it_rides_in() -> None:
-    """scale_metric refuses an exponential histogram.
-
-    Under the default error mode that one refusal fails the whole batch:
-    every metric from every pod in the scrape is lost, not the one it
-    could not convert.
-    """
-    blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-    scales = next(b for b in blocks if any("scale_metric" in st for st in b["statements"]))
-    assert scales["error_mode"] == "ignore"
-
-
-def test_dcgm_units_are_converted_to_the_unit_the_name_claims() -> None:
-    """DCGM reports mJ and MiB; the names say joules and bytes."""
-    blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-    scales = " ".join(blocks[0]["statements"])
-    assert "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION" in scales
-    assert "DCGM_FI_DEV_FB_USED" in scales
-
-
-def test_every_unit_the_api_offers_has_a_conversion() -> None:
-    """A unit the API accepts with no conversion here is a KeyError at render time."""
+def test_units_converted() -> None:
+    """Every unit the MetricMapping API offers has a conversion factor."""
+    # A unit the API accepts with no conversion is a KeyError at render time.
     annotation = mmv1alpha1.Metric.model_fields["fromUnit"].annotation
     literal = next(a for a in typing.get_args(annotation) if typing.get_origin(a) is typing.Literal)
-    assert set(typing.get_args(literal)) == set(collector._UNIT_FACTOR)
+    assert set(collector._UNIT_FACTOR) == set(typing.get_args(literal))
 
 
-def test_a_percentage_is_divided_into_a_ratio() -> None:
-    """A component counting 0 to 100 under a name that says a ratio is 100x out.
-
-    vLLM and SGLang both publish a fraction, so no built-in needs this, but
-    vLLM's is called kv_cache_usage_perc - the name is no guide, and an
-    engine that means it has to be able to say so.
-    """
-    mapping = mmv1alpha1.MetricMapping.model_validate(
-        {
-            "spec": {
-                "metrics": [
-                    {
-                        "from": "my_engine_cache_percent",
-                        "to": "modelplane_kv_cache_utilization_ratio",
-                        "fromUnit": "Percent",
-                    }
-                ]
-            }
-        }
-    )
-    _, scale, _, _ = collector.statements([mapping])
-    assert scale == ['scale_metric(0.01) where metric.name == "my_engine_cache_percent"']
-
-
-def test_a_metric_name_cannot_end_the_comparison_early() -> None:
-    """A quote in `from` would rename whatever the rest of the line matched."""
+def test_metric_name_pattern() -> None:
+    """The MetricMapping schema rejects a quote in a metric name."""
+    # A quote in `from` would end the OTTL comparison early, and rename
+    # whatever the rest of the line matched.
     with pytest.raises(ValidationError, match="String should match pattern"):
         mmv1alpha1.Metric.model_validate({"from": 'x" or true or name == "y', "to": "modelplane_x"})
-    for mapping in stacks.BUILTIN_MAPPINGS:
-        for m in mapping.spec.metrics:
-            round_tripped = mmv1alpha1.Metric.model_validate({"from": m.from_, "to": m.to})
-            assert round_tripped.from_ == m.from_
+    # This re-validates every built-in metric, read from the stacks package, and
+    # can't fail: stacks.metrics builds each one with Metric.model_validate at
+    # import, so a name the pattern rejected would fail this module's import
+    # before it got here.
+    builtin = [m for mapping in stacks.BUILTIN_MAPPINGS for m in mapping.spec.metrics]
+    got = [mmv1alpha1.Metric.model_validate({"from": m.from_, "to": m.to}).from_ for m in builtin]
+    assert got == [m.from_ for m in builtin]
 
 
-def test_a_label_value_cannot_end_the_string_it_sits_in() -> None:
-    """`from` is pattern-constrained; a label's value cannot be.
-
-    A value and a `values` remap carry whatever vocabulary the component
-    already writes, so the schema has to take free text. A quote in one
-    would close the OTTL literal early and leave the remainder of the
-    value as OTTL - at best the collector refuses to start.
-    """
-    mapping = mmv1alpha1.MetricMapping.model_validate(
-        {
-            "spec": {
-                "metrics": [
-                    {
-                        "from": "my_engine_finish",
-                        "to": "modelplane_requests_total",
-                        "labels": [{"name": "reason", "from": "finish", "values": {'ab"c': 'x"y'}}],
-                    }
-                ]
-            }
-        }
-    )
-    _, _, datapoint, _ = collector.statements([mapping])
-    joined = " ".join(datapoint)
-    assert r'"ab\"c"' in joined
-    assert r'"x\"y"' in joined
-
-
-def test_carrying_a_label_onto_itself_keeps_it() -> None:
-    """`from` equal to `name` is how a mapping remaps values in place.
-
-    The delete that stops a carried label costing twice the cardinality
-    would otherwise take the label the statements before it just set, and
-    the series would lose the label entirely.
-    """
-    mapping = mmv1alpha1.MetricMapping.model_validate(
-        {
-            "spec": {
-                "metrics": [
-                    {
-                        "from": "my_engine_finish",
-                        "to": "modelplane_requests_total",
-                        "labels": [{"name": "reason", "from": "reason", "values": {"eos": "stop"}}],
-                    }
-                ]
-            }
-        }
-    )
-    _, _, datapoint, _ = collector.statements([mapping])
-    assert not [st for st in datapoint if st.startswith("delete_key")]
-
-
-def test_a_value_rewrite_never_lands_in_the_metric_context() -> None:
-    """value_double is a datapoint path; the collector refuses to start on it here."""
-    blocks = _config()["processors"]["transform/modelplane"]["metric_statements"]
-    metric_block = next(b for b in blocks if b["context"] == "metric")
-    assert not [st for st in metric_block["statements"] if "value_double" in st]
-    for block in blocks:
-        for st in block["statements"]:
-            assert "set(name," not in st
-            assert "set(value_double," not in st
-
-
-def test_sglang_carries_no_queue_time_or_preemption() -> None:
-    """SGLang publishes neither, so there is nothing to rename onto them.
-
-    Checked against a running SGLang v0.4.9.post2: it has no per-request
-    queue-time metric and no retraction counters at all. The nearest
-    thing, sglang:avg_request_queue_latency, is a gauge of the mean over
-    the last batch - a different measurement from vLLM's per-request
-    histogram, and one name holding both makes a fleet quantile
-    meaningless.
-    """
+def test_sglang_mappings() -> None:
+    """The SGLang built-in renames nothing onto queue time or preemption."""
+    # SGLang publishes neither. Checked against a running SGLang v0.4.9.post2:
+    # it has no per-request queue-time metric and no retraction counters at
+    # all. The nearest thing, sglang:avg_request_queue_latency, is a gauge of
+    # the mean over the last batch - a different measurement from vLLM's
+    # per-request histogram, and one name holding both makes a fleet quantile
+    # meaningless. The built-in mappings are read from the stacks package,
+    # because they're what this checks.
     sglang = {
         m.from_: m.to
         for mapping in stacks.BUILTIN_MAPPINGS
@@ -415,99 +1210,11 @@ def test_sglang_carries_no_queue_time_or_preemption() -> None:
         if m.from_.startswith("sglang:")
     }
     assert sglang, "the SGLang built-in went missing"
-    assert "modelplane_request_queue_seconds" not in sglang.values()
-    assert "modelplane_requests_preempted_total" not in sglang.values()
-    assert not [k for k in sglang if "retracted" in k or "queue_time" in k]
-
-
-def test_sglang_latency_histograms_are_not_renamed() -> None:
-    """Their buckets resolve to 100ms where vLLM's resolve to 1ms."""
-    joined = " ".join(_metric_statements())
-    assert "sglang:time_to_first_token_seconds" not in joined
-    assert "sglang:inter_token_latency" not in joined
-
-
-def test_config_hash_is_stable_across_processes() -> None:
-    """hash() is seeded per process, so it would redeploy on every reconcile."""
-    first = _objects()["collector"]["spec"]["template"]["metadata"]["annotations"]
-    second = _objects()["collector"]["spec"]["template"]["metadata"]["annotations"]
-    assert first == second
-    assert re.search(r"^[0-9a-f]{16}$", first["modelplane.ai/config-hash"])
-
-
-def test_credentials_mount_as_a_file_and_an_environment_variable() -> None:
-    """A rotated token in an environment variable needs a restart to be read."""
-    pod = _objects(secret="telemetry-credentials")["collector"]["spec"]["template"]["spec"]
-    assert "credentials-primary" in [v["name"] for v in pod["volumes"]]
-    assert pod["containers"][0]["envFrom"] == [{"secretRef": {"name": "telemetry-credentials"}}]
-
-
-def test_each_sink_gets_its_own_credential_directory() -> None:
-    """Two sinks can both hold a key called token, and neither reads the other's."""
-    sinks = [
-        _sink(name="vendor", secret="vendor-token"),
-        _sink(name="prometheus", type_="prometheusremotewrite", secret="prom-token"),
-    ]
-    pod = {k: m for k, m, _ in collector.objects("prod-us-east", list(stacks.BUILTIN_MAPPINGS), sinks, _EXTENSIONS)}[
-        "collector"
-    ]["spec"]["template"]["spec"]
-    mounts = {m["name"]: m["mountPath"] for m in pod["containers"][0]["volumeMounts"]}
-    assert mounts["credentials-vendor"] == "/etc/modelplane/telemetry/vendor"
-    assert mounts["credentials-prometheus"] == "/etc/modelplane/telemetry/prometheus"
-
-
-def test_two_sinks_of_one_type_do_not_collide() -> None:
-    """The collector names a second instance of a component <type>/<name>."""
-    rendered = collector.exporters([_sink(name="a"), _sink(name="b")])
-    assert sorted(rendered) == ["otlphttp/a", "otlphttp/b"]
-
-
-def test_a_sink_that_addresses_its_destination_another_way() -> None:
-    """Kafka takes brokers, the debug exporter nothing; neither has an endpoint."""
-    sinks = [
-        tdv1alpha1.Sink.model_validate(
-            {"name": "bus", "type": "kafka", "config": {"brokers": ["kafka.acme.example:9092"]}}
-        ),
-        tdv1alpha1.Sink.model_validate({"name": "seen", "type": "debug"}),
-    ]
-    rendered = collector.exporters(sinks)
-    assert "endpoint" not in rendered["kafka/bus"]
-    assert rendered["kafka/bus"]["brokers"] == ["kafka.acme.example:9092"]
-    assert rendered["debug/seen"] == {}
-
-
-def test_auth_composes_its_own_authenticator() -> None:
-    """The collector carries no credential on an exporter, only a reference."""
-    sink = _sink(secret="telemetry-credentials")
-    assert collector.authenticators([sink]) == {
-        "bearertokenauth/primary": {"filename": "/etc/modelplane/telemetry/primary/token"}
+    unpublished = {
+        source: target
+        for source, target in sglang.items()
+        if target in {"modelplane_request_queue_seconds", "modelplane_requests_preempted_total"}
+        or "retracted" in source
+        or "queue_time" in source
     }
-    assert collector.exporters([sink])["otlphttp/primary"]["auth"] == {"authenticator": "bearertokenauth/primary"}
-
-
-def test_a_sinks_own_config_cannot_redirect_it() -> None:
-    """The endpoint is Modelplane's, and goes on after the operator's config."""
-    sink = tdv1alpha1.Sink.model_validate(
-        {
-            "name": "primary",
-            "type": "otlphttp",
-            "endpoint": "https://otel.acme.example",
-            "config": {"endpoint": "https://elsewhere.example", "compression": "gzip"},
-        }
-    )
-    rendered = collector.exporters([sink])["otlphttp/primary"]
-    assert rendered["endpoint"] == "https://otel.acme.example"
-    assert rendered["compression"] == "gzip"
-
-
-def test_no_secret_mounts_nothing() -> None:
-    pod = _objects()["collector"]["spec"]["template"]["spec"]
-    assert [v["name"] for v in pod["volumes"]] == ["config"]
-    assert "envFrom" not in pod["containers"][0]
-
-
-def test_rbac_is_read_only() -> None:
-    """Service discovery needs to list pods, and nothing needs to write."""
-    rules = _objects()["collector-clusterrole"]["rules"]
-    verbs = {v for r in rules for v in r["verbs"]}
-    assert verbs == {"get", "list", "watch"}
+    assert unpublished == {}, "SGLang publishes no queue time or preemption to rename"
