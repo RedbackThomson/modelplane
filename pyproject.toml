@@ -60,6 +60,9 @@ select = [
     "PT",     # flake8-pytest-style (pytest idioms, no unittest assertions)
     "RUF",    # ruff-specific rules (incl. unused/malformed noqa)
 ]
+# The function unit test checker (hack/check_function_tests.py) takes its
+# escapes as noqa codes, which ruff would otherwise reject as unknown.
+external = ["MPT"]
 
 [tool.ruff.lint.pylint]
 # Builder functions like helm_release use named parameters for clarity.
@@ -82,6 +85,8 @@ allow-star-arg-any = true
 "functions/*/function/fn.py" = ["N802"]
 # The docs manifest validator is a CLI script; print is its output.
 "docs/utils/validate/**" = ["T201"]
+# The function unit test checker is a CLI script; print is its output.
+"hack/check_function_tests.py" = ["T201"]
 # Generated serving stack lists carry upstream chart values verbatim; long
 # string literals and unicode arrive from the recipes.
 "functions/*/function/stacks/clouds/generated/**" = ["E501", "RUF001", "RUF002", "RUF003"]

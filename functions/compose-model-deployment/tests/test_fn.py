@@ -2285,7 +2285,7 @@ INJECT_NAME_CASES = [
 @pytest.mark.parametrize("case", INJECT_NAME_CASES, ids=lambda case: case.name)
 def test_inject_name(case: InjectNameCase) -> None:
     """_inject_served_model_name puts the served model name first in each container's env."""
-    got = case.template.model_copy(deep=True)
+    got = case.template.model_copy(deep=True)  # noqa: MPT401  # _inject_served_model_name edits it in place.
     fn._inject_served_model_name(got, case.served)
     assert got.model_dump() == case.want.model_dump(), case.reason
 

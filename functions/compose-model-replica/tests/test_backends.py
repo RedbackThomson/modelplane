@@ -6747,7 +6747,7 @@ APPLY_CASES = [
 @pytest.mark.parametrize("case", APPLY_CASES, ids=lambda case: case.name)
 def test_apply(case: ApplyCase) -> None:
     """routing.apply fronts a replica's engines with the routing its serving mode selects."""
-    composed = {key: k8sobjv1alpha1.Object.model_validate(copy.deepcopy(obj)) for key, obj in case.composed.items()}
+    composed = {key: k8sobjv1alpha1.Object.model_validate(copy.deepcopy(obj)) for key, obj in case.composed.items()}  # noqa: MPT401  # routing.apply edits the manifests in place.
     got = routing.apply(composed, case.replica, case.provider_config)
     assert _sorted(objects=_to_dicts(objects=got)) == _sorted(objects=case.want), case.reason
 
