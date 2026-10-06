@@ -5,7 +5,7 @@ description: A reachable inference endpoint, composed per replica or created man
 ---
 **API:** [`modelplane.ai/v1alpha1` · ModelEndpoint]({{< ref "/reference/modelendpoints" >}})
 <!-- vale write-good.Passive = NO -->
-A `ModelEndpoint` is a single reachable inference endpoint that a
+A `ModelEndpoint` is a reachable inference endpoint that a
 [`ModelService`]({{< ref "model-service.md" >}}) can route to. Modelplane creates
 one for each of your replicas automatically, but you can also create one by hand
 to point at an inference endpoint Modelplane doesn't run, most often a SaaS

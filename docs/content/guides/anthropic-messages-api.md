@@ -11,7 +11,7 @@ client that speaks the Messages API, including Claude Code via
 `ANTHROPIC_BASE_URL`, names the service as the model in its request. See
 [Alternate APIs]({{< ref "/models/model-service.md" >}}) for the detail.
 
-This recipe serves Qwen3-8B on a single NVIDIA H100 on Nebius, with tool calling
+This recipe serves Qwen3-8B on one NVIDIA H100 on Nebius, with tool calling
 on: `--enable-auto-tool-choice` and `--tool-call-parser=hermes` are what let
 Claude Code's tool use work. An 8B model needs a fraction of an H100, so the GPU
 has ample headroom. Apply the platform side first, then the ML side.

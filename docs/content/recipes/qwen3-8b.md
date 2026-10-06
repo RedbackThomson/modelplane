@@ -1,7 +1,7 @@
 ---
 title: Qwen3-8B
 weight: 10
-description: An 8.2B dense chat model on a single NVIDIA L4.
+description: An 8.2B dense chat model on one NVIDIA L4.
 model: Qwen/Qwen3-8B
 vendors: [Qwen]
 clouds: [EKS]
@@ -20,8 +20,8 @@ features:
     note: for low latency and small batch sizes
 ---
 <!-- vale write-good.Passive = NO -->
-An 8.2B dense chat model on a single NVIDIA L4. The smallest recipe: one
-`Standalone` engine, no cache, weights pulled straight from Hugging Face.
+An 8.2B dense chat model on one NVIDIA L4. It's the smallest recipe, with one
+`Standalone` engine, no cache, and weights pulled straight from Hugging Face.
 
 This recipe was run end to end; the `InferenceClass` and `ModelDeployment` are
 the exact manifests from that run. Apply the platform side first, then the ML
@@ -46,17 +46,17 @@ side.
 ## Speculative decoding
 
 The same model and platform also serve with n-gram (prompt-lookup) speculative
-decoding, which proposes tokens by matching the prompt and so needs no draft
-model or second set of weights. On copy-heavy output, editing a pasted code
-block where most output tokens are copied from the prompt, it roughly doubles
-decode throughput and halves the time per output token:
+decoding, which proposes tokens by matching the prompt and so doesn't need a
+draft model or a second set of weights. On copy-heavy output, editing a pasted
+code block where most output tokens are copied from the prompt, it roughly
+doubles decode throughput and halves the time per output token:
 
 | Metric | Without speculation | With n-gram speculation |
 |---|---|---|
 | Output token throughput (tok/s) | 16.10 | 39.01 |
 | Mean TPOT (ms/token) | 60.20 | 24.21 |
 
-Measured on a single L4 (`vllm/vllm-openai:v0.23.0`, Qwen3-8B, 30 copy-heavy
+Measured on one L4 (`vllm/vllm-openai:v0.23.0`, Qwen3-8B, 30 copy-heavy
 prompts at concurrency 1) against the same model without `--speculative-config`;
 the speculative run accepted 65% of drafted tokens, a mean acceptance length of
 4.27 of 5. Speculation proposes several tokens per decode step and verifies them in

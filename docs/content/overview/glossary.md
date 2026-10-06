@@ -6,9 +6,9 @@ description: Terms used throughout the Modelplane docs and what they mean.
 
 ## Modelplane
 
-The open source control plane software. You install Modelplane on a Kubernetes
-cluster (the **control cluster**). Modelplane never serves tokens itself; it
-orchestrates the clusters and engines that do.
+The open source control plane for AI inference. You install Modelplane on a
+Kubernetes cluster (the **control cluster**). Modelplane never serves tokens
+itself. It orchestrates the clusters and engines that do.
 
 ## Control cluster
 
@@ -24,7 +24,7 @@ you can bring your own through an `InferenceCluster` with `source: Existing`.
 
 ## Fleet
 
-All inference clusters managed by a single Modelplane control cluster.
+All inference clusters managed by one Modelplane control cluster.
 
 ## Serving stack
 

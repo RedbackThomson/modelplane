@@ -22,8 +22,8 @@ The required `source` enum names the kind, with the matching source object set
 alongside it. Setting `source: HuggingFace` selects `spec.huggingFace`, which
 carries the `repo` to fetch, an optional `revision` (branch, tag, or commit), and
 `sizeGiB`, how much storage the weights get on each cluster. Size it to the
-model, since a value below the model's size leaves no room to stage the weights.
-`HuggingFace` is the only source today.
+model, since a value below the model's size doesn't leave room to stage the
+weights. `HuggingFace` is the only source today.
 
 The engine's args name the model the same way with or without a cache. A
 `HuggingFace` source stages into HuggingFace's own cache layout on the mount, and
@@ -35,13 +35,13 @@ itself: naming the model belongs to the engine command, like every other flag.
 Name the same `revision` the cache staged. A bare repository ID resolves at the
 default branch, which finds a cache staged without a `revision` or with
 `revision: main`. A cache pinned to a commit or tag needs the engine to pass that
-revision too (`--revision` for vLLM). An engine that asks for the default branch
-finds nothing staged under it, and downloads the model a second time.
+revision too (`--revision` for vLLM). If the engine uses the default branch
+instead, it finds nothing staged there and downloads the model a second time.
 
 ## Authenticating
 
 A gated or private model needs a credential to fetch. When a cache stages the
-weights, the credential lives on the cache: set `authSecret` to name a Secret in
+weights, the credential goes on the cache: set `authSecret` to name a Secret in
 the cache's namespace, and Modelplane propagates it to every cluster the cache
 stages to, for the hydration to read.
 
@@ -72,7 +72,7 @@ container's `env`.
 
 An optional `clusterSelector` scopes where the cache is staged. Omitting it
 stages the cache on every cluster in the fleet; setting `matchLabels` restricts
-it to clusters carrying those labels. Either way, a cluster with no
+it to clusters with those labels. Either way, a cluster with no
 [cache storage](#storage-prerequisites) is skipped. A `ModelDeployment` that
 references the cache places replicas only on clusters the cache stages to, and
 moves a replica off a cluster the cache stops staging to, since the cache's
@@ -80,11 +80,11 @@ volume is removed from it.
 
 ## Loading from cache
 
-A cache only pays off if the engine reads from it quickly. With its default
-loader an engine can read a large model from shared storage slowly enough that
-the cache makes cold starts *worse* than fetching the model directly, since you
-pay to hydrate the cache and then wait on a slow read. Choose a fast loader with
-your engine flags.
+A cache only shortens cold starts if the engine reads from it quickly. With its
+default loader an engine can read a large model from shared storage slowly
+enough that the cache makes cold starts *worse* than fetching the model
+directly, since you pay to hydrate the cache and then wait on a slow read.
+Choose a fast loader with your engine flags.
 
 For vLLM on EKS, `--load-format=runai_streamer` reads from the EFS-backed cache
 dramatically faster than the default loader (minutes rather than tens of
@@ -112,10 +112,10 @@ Modelplane injects ModelExpress env into every engine pod that references a
 cache. An engine opts in with `--load-format modelexpress`: the first replica
 loads from its PVC seed and publishes itself as a source, and later replicas pull
 from a peer over RDMA rather than reading storage again. A replica that finds no
-compatible peer, or no fabric to reach one over, falls back to the PVC, so the
-cache still has to be sized and kept for every replica. The env is inert unless
-the engine opts in, so a cache still works unchanged on a Standard cluster and a
-deployment is portable between the two.
+compatible peer, or no fabric connecting it to one, falls back to the PVC, so
+the cache still has to be sized and kept for every replica. Because the env is
+inert unless the engine opts in, a cache still works unchanged on a Standard
+cluster and a deployment is portable between the two.
 
 Modelplane injects no `--load-format` flag: the ML team's engine command decides
 whether to use ModelExpress's loader, the same as it decides

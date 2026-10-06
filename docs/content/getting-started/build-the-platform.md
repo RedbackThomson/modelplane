@@ -4,9 +4,9 @@ weight: 20
 description: Set up the gateway, give the control plane cloud credentials, and provision your first GPU cluster.
 ---
 This is the platform team's side of Modelplane. You set up the gateway that
-fronts your models, give the control plane cloud credentials, and register your
-first GPU cluster: a hardware profile published as an `InferenceClass` and an
-`InferenceCluster` that offers it.
+fronts your models, give the control plane credentials for your cloud account,
+and register your first GPU cluster: a hardware profile published as an
+`InferenceClass` and an `InferenceCluster` that offers it.
 
 In the next step, the ML team will create a model deployment that schedules
 against this capacity without knowing which cluster it runs on.
@@ -31,8 +31,8 @@ against this capacity without knowing which cluster it runs on.
   | `roles/iam.serviceAccountUser` | attaching that account to the nodes |
   | `roles/resourcemanager.projectIamAdmin` | granting the node account `container.admin` |
 
-  The last one is worth a look before you hand the key over. Modelplane grants
-  the node service account `roles/container.admin`, so the credential doing the
+  Review the last one before you hand the key over. Modelplane grants the node
+  service account `roles/container.admin`, so the credential doing the
   provisioning has to be able to set project IAM policy.
 {{< /tab >}}
 {{< tab "AKS" >}}

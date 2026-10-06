@@ -19,8 +19,8 @@ A provider can show up here in three ways:
   version), so you can run on the providers below now, ahead of native
   provisioning.
 - **Crossplane provider exists.** A Crossplane provider is published for the
-  cloud. That provider is the path by which native provisioning lands, so it
-  marks where Modelplane can grow next.
+  cloud. Native provisioning would build on that provider, so it marks where
+  Modelplane can grow next.
 {{< /hint >}}
 
 ## Clouds and neoclouds

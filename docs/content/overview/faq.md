@@ -1,7 +1,7 @@
 ---
 title: FAQ
 weight: 35
-description: Short answers to the questions practitioners ask about Modelplane first.
+description: Short answers to the questions people ask first about Modelplane.
 ---
 <!-- vale write-good.TooWordy = NO -->
 <!-- vale write-good.Passive = NO -->
@@ -19,7 +19,7 @@ it, routes to it, scales it, and caches its weights across your inference fleet.
 {{< /qa >}}
 
 {{< qa "Does Modelplane replace vLLM or SGLang?" >}}
-No, they run the model; Modelplane runs the fleet. A `ModelDeployment` carries
+No, they run the model; Modelplane runs the fleet. A `ModelDeployment` specifies
 your engine container and its flags, and Modelplane composes it onto the right
 cluster. Switching or upgrading engines is a change to your deployment, not to
 Modelplane.
@@ -27,7 +27,7 @@ Modelplane.
 
 {{< qa "How is Modelplane different from KServe or NVIDIA Dynamo?" >}}
 Scope. KServe and Dynamo are cluster orchestrators: they schedule, scale, route,
-and cache within a single Kubernetes cluster. Modelplane runs those operations
+and cache within one Kubernetes cluster. Modelplane runs those operations
 across a fleet of clusters, clouds, and regions. It uses llm-d for
 inference-aware routing, and installs a per-cluster
 [serving stack]({{< ref "/platform/inference-cluster.md#serving-stack" >}}) that's
@@ -116,8 +116,8 @@ replica on a cluster and pool that fits and has free capacity.
 {{< /qa >}}
 
 {{< qa "Can I serve across regions and clusters behind one endpoint?" >}}
-Yes, that's the point. A `ModelService` gives callers one model name and
-load-balances across every replica of a deployment, wherever they run.
+Yes, a `ModelService` gives callers one model name and load-balances across
+every replica of a deployment, wherever they run.
 {{< /qa >}}
 
 {{< qa "Can I route to a managed provider?" >}}

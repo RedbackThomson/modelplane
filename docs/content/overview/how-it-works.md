@@ -66,9 +66,9 @@ model, and Modelplane composes the rest.
 
 The hierarchy mirrors Kubernetes core one scope up: `ModelDeployment` →
 `ModelReplica` → `ModelService` → `ModelEndpoint` parallels `Deployment` → `Pod` → `Service` →
-`Endpoint`, across a fleet instead of within a single cluster.
+`Endpoint`, across a fleet instead of within one cluster.
 
-## What the control plane reconciles
+## Reconciliation
 
 Once the resources exist, Modelplane keeps the fleet matching them. Five concerns
 run continuously:
@@ -127,14 +127,13 @@ covers the placement rules and their limits in full.
 
 ## Deploying a model
 
-Creating a `ModelDeployment` kicks off the loop end to end. The scheduler
-discovers the ready clusters (filtered by your label selector if you set one),
-matches each engine's device requests against their pools, and pins each replica
-to a cluster that fits. Modelplane composes a `ModelReplica` on each chosen
-cluster, turns it into the right serving workload there, creates a `ModelEndpoint`
-per replica, and your `ModelService` routes traffic across them under one stable
-model name on the gateway. Scale the deployment up or down and the same loop
-re-converges.
+Creating a `ModelDeployment` starts the whole loop. The scheduler discovers the
+ready clusters (filtered by your label selector if you set one) and pins each
+replica to a cluster whose pools fit its engines' device requests. Modelplane
+composes a `ModelReplica` on each chosen cluster, turns it into the right
+serving workload there, creates a `ModelEndpoint` per replica, and your
+`ModelService` routes traffic across them under one stable model name on the
+gateway. Scale the deployment up or down and the same loop re-converges.
 
 ## Serving topologies
 
@@ -144,13 +143,14 @@ service. When a model is too large for one node, an engine becomes a gang: a
 across nodes. How Modelplane composes and schedules the gang depends on the
 cluster's [serving stack]({{< ref "/platform/inference-cluster.md#serving-stack" >}}),
 Standard or Dynamo. Gang deployments should stage their weights through a
-`ModelCache`, so the pods share one copy instead of each pulling the same model.
+`ModelCache` so that the pods share one copy instead of each pulling the same
+model.
 
 Disaggregated serving splits prefill and decode into separate engines
 (`serving.mode: PrefillDecode`) that run on the same cluster and hand off the KV
 cache between them. Modelplane wires up the cluster-edge routing that pairs each
-request's prefill and decode; the engines carry the KV-transfer flags. Both are
-described in full in the [model deployment docs]({{< ref "/models/model-deployment" >}}).
+request's prefill and decode; you set the KV-transfer flags on the engines. Both
+are described in full in the [model deployment docs]({{< ref "/models/model-deployment" >}}).
 
 ## Next steps
 

@@ -23,8 +23,8 @@ model; the native FP8 weights need four such nodes.
 
 This recipe was run end to end; the `InferenceClass` and `ModelDeployment` are
 the exact manifests from that run. Apply the platform side first, then the ML
-side. The `InferenceCluster` carries an EC2 capacity reservation placeholder to
-edit before applying.
+side. Edit the EC2 capacity reservation placeholder in the `InferenceCluster`
+before applying it.
 
 ## Validated deployments
 

@@ -9,9 +9,9 @@ plane.
 ## Delete model resources
 
 Delete model resources before clusters. A cluster refuses deletion while
-anything still runs on it. Foreground cascading deletion holds each resource
-until what it composed on the clusters is gone, so a cluster isn't released
-while that's still being removed:
+anything still runs on it. Foreground cascading deletion removes a resource
+only after what it composed on the clusters is gone. That stops a cluster being
+released while its workloads are still being torn down:
 
 ```bash
 kubectl delete md --all -n ml-team --cascade=foreground
@@ -21,9 +21,9 @@ kubectl delete ms --all -n ml-team --cascade=foreground
 ## Delete the gateway
 
 Delete the gateway before its cluster. The `InferenceGateway` runs a load balancer
-on the cluster it names; deleting it while that cluster is still up lets the load
-balancer be removed, rather than leaking it when the cluster goes. Foreground
-deletion holds the gateway until its objects on the cluster are deleted:
+on the cluster it names. If that cluster is deleted first, the load balancer is
+orphaned. Foreground deletion removes the gateway only after its objects on the
+cluster are deleted:
 
 ```bash
 kubectl delete ig --all --cascade=foreground
@@ -33,8 +33,8 @@ kubectl delete ig --all --cascade=foreground
 
 Delete all clusters with foreground cascading deletion. The serving stack on each
 workload cluster must uninstall while that cluster's API server is still
-reachable. Foreground deletion holds each cluster object until its stack
-finishes. Background deletion can orphan cloud resources.
+reachable. Foreground deletion removes each cluster object only after its stack
+finishes uninstalling. Background deletion can orphan cloud resources.
 
 ```bash
 kubectl delete ic --all --cascade=foreground

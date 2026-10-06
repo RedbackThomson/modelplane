@@ -26,8 +26,8 @@ matter here:
 - **Composition functions** are that controller logic. A function is a small gRPC
   service handed the observed XR and the resources it depends on, which returns
   the desired child resources. An XR runs a pipeline of one or more functions
-  every reconcile; in Modelplane each is typically a single function, so the rest
-  of this section says "the function" for short.
+  every reconcile; in Modelplane each pipeline typically has one function, so
+  the rest of this section says "the function" for short.
 - **Providers** are controllers that manage external systems through their own
   managed resources: `provider-gcp` and `provider-aws` for cloud APIs,
   `provider-helm` for Helm releases, `provider-kubernetes` for arbitrary objects
@@ -43,7 +43,7 @@ The resource model mirrors Kubernetes core, one scope up:
 rather than within one. A `ModelDeployment` composes a `ModelReplica` per replica,
 a `ModelReplica` composes the serving workload on its target cluster, and a
 `ModelService` routes across the `ModelEndpoint`s. If you know how those core
-objects relate, you already know the shape of Modelplane's.
+objects relate, you already know how Modelplane's fit together.
 
 ## Why Crossplane?
 
@@ -54,8 +54,8 @@ ways: providers and functions.
 
 **Providers** give us reach. Modelplane has to provision Kubernetes clusters and
 all the infrastructure they need across different clouds, then install software
-onto them. That's an enormous surface, and providers cover it without us rolling
-our own controllers for each cloud API and Helm release.
+onto them. That spans many cloud APIs and Helm releases, and providers cover
+them without us rolling our own controller for each.
 
 **Functions** are where Modelplane's own logic lives, and writing it as
 composition functions buys several things:
@@ -74,7 +74,7 @@ composition functions buys several things:
   for contributors. The performance-sensitive distributed-systems core stays in
   Go, where Crossplane and its providers already are.
 
-The bet underneath both is that inference infrastructure is the same shape of
+The bet underneath both is that inference infrastructure is the same kind of
 problem as cloud infrastructure, which Crossplane manages well. Building on it
 lets Modelplane spend its effort on the part that's actually inference-specific.
 
@@ -82,18 +82,18 @@ lets Modelplane spend its effort on the part that's actually inference-specific.
 
 Modelplane runs on a **control cluster** and manages a fleet of **workload
 clusters**, the `InferenceCluster`s. The split is deliberate: the control plane
-holds no GPUs and serves no tokens. It schedules and composes, and the
+has no GPUs and doesn't serve tokens. It schedules and composes, and the
 workload clusters do the serving.
 
 The control cluster runs Crossplane, the Modelplane composition functions (one
 per resource, each a pod Crossplane calls per reconcile), and the providers. It
-also holds every Modelplane resource and the `ProviderConfig`s that let the
-providers reach each workload cluster, built from that cluster's kubeconfig.
+also holds every Modelplane resource and the `ProviderConfig`s the providers use
+to connect to each workload cluster, built from that cluster's kubeconfig.
 
-Crossplane core drives everything. Each reconcile it asks a function what a
-resource should compose and gets back the desired resources. Core then reconciles
-them, applying the provider resources that the providers act on. A function only
-computes desired state. It never reaches a provider or a cluster itself.
+Crossplane core drives everything. Each reconcile it calls a resource's function
+and gets back the desired resources. Core then reconciles them, applying the
+provider resources that the providers act on. A function only computes desired
+state. It never reaches a provider or a cluster itself.
 
 ```mermaid
 flowchart TB
@@ -119,7 +119,7 @@ The exact components evolve, but Modelplane composes and owns all of them. For
 provisioned clusters the providers also create the cluster and its node pools
 first.
 
-## How a deployment is composed
+## Composing a deployment
 
 A resource composes others, which compose others, until the tree bottoms out in
 provider resources and plain Kubernetes objects. A `ModelDeployment` is the

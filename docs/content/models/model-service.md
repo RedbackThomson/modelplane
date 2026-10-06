@@ -6,14 +6,14 @@ description: Expose a deployment's replicas as one model a caller can name.
 **API:** [`modelplane.ai/v1alpha1` · ModelService]({{< ref "/reference/modelservices" >}})
 <!-- vale write-good.Passive = NO -->
 A [`ModelDeployment`]({{< ref "model-deployment.md" >}}) serves a model, but its
-replicas are scattered across the fleet with no single name. A `ModelService`
+replicas are scattered across the fleet with no shared name. A `ModelService`
 gives them one: a stable name that load-balances across every replica, wherever
 it runs. A caller names it as the model in an ordinary OpenAI or Anthropic
 request to a gateway that serves it.
 
 A service selects what to route to by label. Behind the scenes, Modelplane
-creates one `ModelEndpoint`, a single reachable backend, for each replica of a
-deployment and labels it. Two of those labels carry routing intent:
+creates one `ModelEndpoint`, a reachable backend, for each replica of a
+deployment and sets these routing labels on it:
 
 - `modelplane.ai/deployment`: the deployment the replica belongs to.
 - `modelplane.ai/cluster`: the cluster the replica runs on.
@@ -33,7 +33,7 @@ endpoint that any entry matches. The patterns below build on that.
 
 ## Route to a whole deployment
 
-The common case: one selector matching a deployment's name reaches every replica,
+In the common case, one selector on a deployment's name matches every replica,
 wherever in the fleet they run.
 
 ```yaml {nocopy=true}
@@ -67,7 +67,7 @@ spec:
 ## Route across several deployments
 
 Give more than one entry to front several deployments under the same model name. Each
-entry contributes its matched endpoints. By default every entry carries equal
+entry contributes its matched endpoints. By default every entry has equal
 weight, so traffic splits evenly between entries and then spreads as evenly as
 possible across the endpoints each one matches.
 
@@ -92,8 +92,8 @@ takes 80% of requests. The weight applies to the entry as a whole and spreads
 as evenly as possible across the endpoints it matches, so scaling a deployment
 up or down doesn't change its share. An entry without a `weight` defaults to 1.
 
-This is the shape of a canary rollout: send most traffic to the stable deployment
-and a sliver to the new one, then shift the ratio as confidence grows.
+Use this for a canary rollout: send most traffic to the stable deployment and a
+sliver to the new one, then shift the ratio as confidence grows.
 
 ```yaml {nocopy=true}
 spec:
@@ -112,7 +112,7 @@ spec:
 
 The entries don't have to be deployments. One can select a manually created
 [ModelEndpoint]({{< ref "model-endpoint.md" >}}) that points at an external
-provider, so one model name covers both your own replicas and a SaaS endpoint.
+provider, so one model name covers your own replicas and a SaaS endpoint.
 At equal priority the two share traffic by weight. To send the provider only the
 traffic your replicas can't serve, see [failover tiers](#failover-tiers) below.
 
@@ -156,20 +156,19 @@ spec:
 ## Timeouts
 
 `timeouts` sets how long a gateway waits on the service's endpoints. `request`
-bounds a whole request, retries included. `idle` is how long an endpoint may
-send nothing. Before the first byte, the gateway gives up on the endpoint, which
-counts against its health, and retries the request, on another endpoint if
-there is one. Each retry starts the response again, so an `idle` shorter than a
-response that isn't streamed makes the backend generate it up to four times
-before the caller gets a 504. After the first byte, the stream is cut short.
-They default to `300s` and `60s`.
+bounds a whole request, retries included. `idle` is how long an endpoint may go
+without sending anything. Before the first byte, the gateway gives up on the
+endpoint, which counts against its health, and retries the request, on another
+endpoint if there is one. Each retry starts the response again, so an `idle`
+shorter than a response that isn't streamed makes the backend generate it up to
+four times before the caller gets a 504. After the first byte, the stream is cut
+short. They default to `300s` and `60s`.
 
 Whether a response sends anything early depends on whether the caller streams. A
 streamed response starts after prefill, so `idle` bounds time to first token and
-every gap between chunks after it. A response that isn't streamed sends nothing
-until it's complete. If any of a
-service's callers don't stream, set `idle` at least as long as `request`, or to
-`0s` to disable it.
+every gap between chunks after it. A response that isn't streamed doesn't send
+anything until it's complete. If any of a service's callers don't stream, set
+`idle` at least as long as `request`, or to `0s` to disable it.
 
 ```yaml {nocopy=true}
 spec:
@@ -182,20 +181,20 @@ Tune both from what the gateway measures. AI Gateway's
 `gen_ai.server.time_to_first_token` and `gen_ai.server.request.duration` metrics
 give each model's latencies, and Envoy's
 `envoy_cluster_upstream_rq_per_try_idle_timeout` counts idle timeouts. If that
-count rises while the endpoints are healthy, `idle` is too short. A restarting
-gateway lets requests already in flight run for five minutes, so a restart can
-cut off a response allowed longer than that.
+count rises while the endpoints' other error counts don't, `idle` is too short.
+A restarting gateway lets requests already in flight run for five minutes, so a
+restart can cut off a response allowed longer than that.
 
-## How a service reaches its gateways
+## Gateways and routes
 
 An `InferenceGateway` names the services it serves, through a `serviceSelector`
 that matches a service's labels. A gateway with no selector serves every service.
 Label a service for a region and give that region's gateways a matching selector,
 and only they serve it.
 
-For every gateway that serves it, Modelplane composes a `ModelRoute` that renders
-the routing onto that gateway's cluster. You don't write `ModelRoute`s.
-`status.routes` counts them, and `kubectl get modelroutes -l
+For each gateway that serves the service, Modelplane composes a `ModelRoute`
+that renders the routing onto that gateway's cluster. You don't write
+`ModelRoute`s. `status.routes` counts them, and `kubectl get modelroutes -l
 modelplane.ai/service=<name>` shows each one, its gateway, and whether the route
 is ready there. Look there when a service is Ready but a gateway isn't serving
 it.
@@ -209,9 +208,9 @@ publishes a base URL per API it speaks:
 ADDRESS=$(kubectl get ig public -o jsonpath='{.status.endpoints.openAI}')
 ```
 
-Send a request naming the service. The gateway rewrites the name to whatever
-each endpoint's engine or provider expects, so one name reaches replicas and
-third-party providers alike:
+Send a request with the service as its model. The gateway rewrites the name to
+whatever each endpoint's engine or provider expects, so one name covers replicas
+and third-party providers alike:
 
 ```bash
 curl "$ADDRESS/chat/completions" \

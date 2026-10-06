@@ -16,15 +16,15 @@ engineImages: [vllm/vllm-openai:v0.23.0, lmsysorg/sglang:v0.5.10.post1-runtime]
 gpuNote: 8× per node
 ---
 <!-- vale write-good.Passive = NO -->
-A 480B code MoE (35B active). Two validated shapes: the BF16 weights span two
-H200 nodes as a gang over EFA, served from a `ModelCache`; the FP8 checkpoint
-fits one node, so it runs as a single `Standalone` engine on SGLang with no
+A 480B code MoE (35B active), validated in two deployments. The BF16 weights
+span two H200 nodes as a gang over EFA, served from a `ModelCache`. The FP8
+checkpoint fits one node, so it runs as a `Standalone` engine on SGLang with no
 cache.
 
-Both shapes were run end to end; the `InferenceClass` and `ModelDeployment` are
-the exact manifests from those runs. Apply the platform side first, then the ML
-side. The `InferenceCluster` carries an EC2 capacity reservation placeholder to
-edit before applying.
+Both deployments were run end to end; the `InferenceClass` and
+`ModelDeployment` are the exact manifests from those runs. Apply the platform
+side first, then the ML side. Edit the EC2 capacity reservation placeholder in
+the `InferenceCluster` before applying it.
 
 ## Validated deployments
 

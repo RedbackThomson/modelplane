@@ -11,10 +11,10 @@ against it. Without it, every change on one side creates work for the other.
 When the platform team updates infrastructure, ML teams have to react. When
 model requirements change, the platform team gets a request.
 
-With Modelplane, the platform team publishes hardware without knowing what
+With Modelplane, the platform team publishes its hardware without knowing what
 models will run on it. The ML team declares what a model needs without knowing
-what clusters exist. The control plane resolves it and keeps it current as
-both sides change.
+what clusters exist. The control plane places the model on matching hardware
+and moves it only when a change on either side breaks the match.
 
 In this tour, you'll switch between provisioning infrastructure and declaring a
 model to see how they interact. By the end you'll have a GPU fleet across three regions and one OpenAI-compatible endpoint routing to a model served across two of them.

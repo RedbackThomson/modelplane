@@ -1,13 +1,13 @@
 ---
 title: Deploy a Model
 weight: 10
-description: Deploy a model to the fleet, from a single pod to disaggregated prefill and decode.
+description: Deploy a model to the fleet, from one pod to disaggregated prefill and decode.
 ---
 **API:** [`modelplane.ai/v1alpha1` · ModelDeployment]({{< ref "/reference/modeldeployments" >}})
 <!-- vale write-good.Passive = NO -->
 A `ModelDeployment` is the ML team's primary interface. You describe the model
 you want served, the hardware it needs, and how many copies to run; Modelplane
-schedules it onto matching clusters and keeps it running. You never name a
+schedules it onto matching clusters and keeps it running. You never pick a
 cluster.
 
 Modelplane is unopinionated about the engine itself. You bring the container and
@@ -15,13 +15,13 @@ its flags, and Modelplane shapes a serving topology around it. The engine flags
 you write carry parallelism, quantization, and KV transfer, never injected by
 Modelplane.
 
-A deployment's replica shape lives under `spec.template` (mirroring a
-Kubernetes Deployment): the replica count is `spec.replicas`, labels for the
-composed ModelReplicas and ModelEndpoints go on `spec.template.metadata.labels`,
-and everything else lives in `spec.template.spec`. Its
-`spec.template.spec.engines` array describes the topology through two choices:
+As with a Kubernetes Deployment, `spec.replicas` sets the replica count and
+`spec.template` describes each replica. Labels for the composed ModelReplicas
+and ModelEndpoints go on `spec.template.metadata.labels`, and everything else
+goes in `spec.template.spec`. The `spec.template.spec.engines` array describes
+the topology through two choices:
 
-- **One pod or a gang**: whether an engine is a single `Standalone` pod or a
+- **One pod or a gang**: whether an engine is one `Standalone` pod or a
   `Leader` with one or more `Worker` pods coordinating across nodes.
 - **Unified or disaggregated**: whether `spec.template.spec.serving.mode` keeps
   prefill and decode together (`Unified`, the default) or splits them across two
@@ -35,7 +35,7 @@ How many of each to run is a separate question, covered in
 The default, and what the [getting started tour]({{< ref "/getting-started" >}})
 deploys. One `Standalone` member is one pod on one node, claiming that node's
 GPUs through its `nodeSelector`. It's usually the right choice when a model fits
-on a single node. Within a node, tensor parallelism is an engine flag
+on one node. Within a node, tensor parallelism is an engine flag
 (`--tensor-parallel-size`), not a Modelplane concept.
 
 ```yaml {nocopy=true}
@@ -53,8 +53,8 @@ node. The pods serve the model together; how the model splits across them
 (tensor, pipeline, data, or expert parallelism) is up to your engine flags.
 
 A gang should use a [`ModelCache`]({{< ref "model-cache.md" >}}) via
-`spec.template.spec.modelCacheRef`, so every pod mounts the same weights instead
-of each pulling its own.
+`spec.template.spec.modelCacheRef`. Every pod in the gang then mounts the same
+weights instead of each pulling its own.
 
 ```yaml {nocopy=true}
 modelCacheRef:
@@ -114,13 +114,13 @@ so this is a prerequisite Modelplane does not bundle for you.
 
 ## Requesting GPUs
 
-You don't name a cluster or a GPU model. Instead each member's `nodeSelector`
+You don't specify a cluster or a GPU model. Instead each member's `nodeSelector`
 lists the hardware its pods need, and Modelplane finds a node pool that has it.
 The platform team publishes node pools as `InferenceClass` resources, each
-describing the devices its nodes carry. Your request is matched against them.
+describing the devices on its nodes. Your request is matched against them.
 
-A request names a device (`gpu`), how many of it each pod needs (`count`), and
-one or more `selectors` the device must match:
+A request has a name (`gpu`), the number of devices each pod needs (`count`),
+and one or more `selectors` those devices must match:
 
 ```yaml {nocopy=true}
 nodeSelector:
@@ -132,19 +132,19 @@ nodeSelector:
         device.capacity["gpu.nvidia.com"].memory.compareTo(quantity("40Gi")) >= 0
 ```
 
-Each selector is a single line of [CEL](https://cel.dev/), a small expression
-language, that returns true or false for one device. The part in brackets, `"gpu.nvidia.com"`, is the
-GPU vendor's driver. The fields after it, like `memory` or `architecture`, are
-what the platform team published for that device. This one says "match a GPU
-whose memory is at least 40Gi." A device has to match every selector in the
-request. Give two selectors to mean "Hopper, with at least 80Gi."
+Each selector is a [CEL](https://cel.dev/) expression that returns true or
+false for one device. The part in brackets, `"gpu.nvidia.com"`, is the GPU
+vendor's driver. The fields after it, like `memory` or `architecture`, are what
+the platform team published for that device. This one says "match a GPU whose
+memory is at least 40Gi." A device has to match every selector in the request.
+Give two selectors to mean "Hopper, with at least 80Gi."
 
 ### Requesting more than one device
 
-`devices` is a list, so a member can ask for distinct kinds of hardware at once,
-each its own entry with its own `count` and `selectors`. A node pool matches the
-member only when it satisfies every entry. This is how you ask for both a GPU and
-a fast NIC on the same node:
+`devices` is a list, so a member can request distinct kinds of hardware at
+once, each as its own entry with its own `count` and `selectors`. A node pool
+matches the member only when it satisfies each entry. This is how you ask for
+both a GPU and a fast NIC on the same node:
 
 ```yaml {nocopy=true}
 nodeSelector:
@@ -169,10 +169,10 @@ device exposes three things:
   or version), such as `architecture` or `cudaComputeCapability`.
 - `device.capacity["<driver>"].<name>`: a capacity quantity, such as `memory`.
 
-Two helpers build comparable values: `quantity()` parses Kubernetes quantities
-like `"40Gi"`, and `semver()` parses versions like `"9.0.0"`. Both support
-`compareTo` (which orders two values), `isGreaterThan`, and `isLessThan`. Combine
-selectors with the usual CEL operators (`==`, `!=`, `>=`, `&&`, `||`).
+Use `quantity()` to parse Kubernetes quantities like `"40Gi"`, and `semver()` to
+parse versions like `"9.0.0"`. Both return values that support `compareTo`
+(which orders two values), `isGreaterThan`, and `isLessThan`. Combine selectors
+with the usual CEL operators (`==`, `!=`, `>=`, `&&`, `||`).
 
 ```yaml {nocopy=true}
 selectors:
@@ -192,10 +192,10 @@ selectors:
     device.capacity["gpu.nvidia.com"].memory.compareTo(quantity("80Gi")) >= 0
 ```
 
-This is the Kubernetes DRA device selector expression surface. The
-Kubernetes-specific CEL extension libraries (such as regular expressions and IP
-address helpers) aren't available. Selectors in practice are attribute and
-capacity comparisons like those above.
+Selectors use the CEL that Kubernetes DRA accepts for device selectors,
+including `quantity()` and `semver()` but not Kubernetes' other extension
+libraries, such as regular expressions and IP address helpers. Selectors in
+practice are attribute and capacity comparisons like those above.
 
 ### Seeing what's available
 
@@ -209,12 +209,13 @@ kubectl describe inferenceclass gke-l4-1x-g2
 
 The `describe` output shows each device's driver, attributes (like
 `architecture`), and capacity (like `memory`), which are exactly the keys your
-selectors read. If a selector asks for something no published class offers, the
+selectors read. If no published class has a device that matches a selector, the
 deployment won't schedule.
 
 ## Sizing a deployment
 
-Three independent numbers control how many pods a deployment runs:
+A deployment's pod count comes from separate settings that you size
+independently:
 
 - **`spec.replicas`** stamps out whole copies of the entire topology. Each
   replica is a complete serving instance, and replicas usually land on different
@@ -225,7 +226,7 @@ Three independent numbers control how many pods a deployment runs:
   failure drops one copy instead of taking the whole replica out of service. In
   disaggregated serving they also set the prefill-to-decode ratio.
 - **`worker.nodes`** sets how many nodes one gang spans: a `Leader` plus that
-  many `Worker` pods. It's how big a single multi-node engine is.
+  many `Worker` pods. It's how big one multi-node engine is.
 
 ## Scaling
 

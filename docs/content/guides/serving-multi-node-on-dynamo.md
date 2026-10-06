@@ -48,8 +48,8 @@ kubectl create namespace ml-team
 
 The `Leader` and `Worker` run the same `vllm serve`, differing only in node rank.
 `$(MODELPLANE_LEADER_ADDRESS)` resolves to the leader on either stack, but
-`$(MODELPLANE_RANK)` isn't injected on Dynamo yet, so the worker derives its rank
-from Grove's `GROVE_PCLQ_POD_INDEX`.
+`$(MODELPLANE_RANK)` isn't injected on Dynamo yet. The worker derives its rank
+from Grove's `GROVE_PCLQ_POD_INDEX` instead.
 [Multi-node deployments]({{< ref "/models/model-deployment.md#multi-node" >}})
 covers this. Both load with `--load-format modelexpress`, so they read the cached
 weights through the Dynamo stack's ModelExpress server.
@@ -98,8 +98,8 @@ seeds its weights from the cache and publishes itself as a source; the second
 loads them straight from the first, peer-to-peer, rather than reading the cache
 again.
 
-Each replica is a gang of two nodes, so a second replica needs two more nodes.
-Grow the pool to four, then scale the deployment:
+Each replica is a gang of two nodes. A second replica needs two more, so grow
+the pool to four, then scale the deployment:
 
 ```bash
 kubectl patch ic/eks-us-east-dynamo --type=json -p '[
