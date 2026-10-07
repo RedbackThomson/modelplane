@@ -23,7 +23,7 @@ let
         ];
         outputHashMode = "recursive";
         outputHashAlgo = "sha256";
-        outputHash = "sha256-WbPAE0+fnV7gqU7P4c9qKWETRHTR7uP5OpsHCj+l9r4=";
+        outputHash = "sha256-2eRYliSjeVajgP5xCpXjyc62DgZ9PBLfXqBCdOdL/SQ=";
       }
       ''
         export HOME=$TMPDIR
@@ -63,7 +63,9 @@ in
         # picks up both the synced packages and the repo's local styles.
         cp ${self}/docs/utils/vale/.vale.ini .vale.ini
         mkdir styles
-        cp -r ${valeStyles}/* styles/
+        # The synced packages come out of the store read-only, and ai-tells
+        # ships a config/ directory that the repo's vocabularies merge into.
+        cp -r --no-preserve=mode ${valeStyles}/* styles/
         cp -r ${self}/docs/utils/vale/styles/* styles/
         find ${self}/docs/content -name '*.md' -print0 | \
           xargs -0 --no-run-if-empty \

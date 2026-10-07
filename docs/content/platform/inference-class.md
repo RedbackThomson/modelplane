@@ -27,13 +27,13 @@ A class's `devices` follow Kubernetes
 (DRA), the mechanism modern Kubernetes uses to match GPUs to pods. Each device
 has a `driver` (the vendor that owns it, such as `gpu.nvidia.com`), a `count`
 (how many a node has), typed `attributes` (such as `architecture`), and
-`capacity` (quantities, such as `memory`). This mirrors the shape the GPU's DRA
-driver publishes on a real node, so what you declare here is what an ML team's
-`nodeSelector` matches against and what DRA binds at runtime.
+`capacity` (quantities, such as `memory`). This mirrors what the GPU's DRA
+driver publishes on a real node, so what you declare in a class is what an ML
+team's `nodeSelector` matches against and what DRA binds at runtime.
 
 You author the attribute and capacity keys, and there's no fixed list. Pick the
-ones an ML team would reasonably select on, the GPU memory, the architecture, the
-compute capability, using the same names the driver reports.
+ones an ML team would reasonably select on, such as the GPU memory,
+architecture, and compute capability, and use the same keys the driver reports.
 
 ## DRA and synthetic devices
 

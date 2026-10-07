@@ -1,10 +1,10 @@
 ---
 title: Scale the model
 weight: 50
-description: Serve the model from two regions behind a single endpoint.
+description: Serve the model from two regions behind one endpoint.
 ---
 A `ModelService` can front more than one `ModelDeployment`. Here you add a second
-deployment, pinned to a different region, and point the same service at both. The
+deployment in a different region and point the same service at both. The
 endpoint you already curled stays the same. Behind it, traffic now load-balances
 across two regions.
 
@@ -72,7 +72,7 @@ Update the `ModelService` to select both deployments. Each entry in
 The model name doesn't change. Callers that had it before still have it; they
 don't know the fleet changed. The gateway load-balances across both regions, and
 if one region's replicas fail it sends every request to the other. The gateway
-itself runs in one region, so surviving the loss of that region takes a second
+itself runs in one region. Tolerating the loss of that region requires a second
 gateway on a cluster in the other. Send the same request as before:
 
 ```bash
@@ -91,10 +91,10 @@ kubectl run -i --rm curl-test \
 
 ## That's the tour
 
-You stood up a control plane, built a multi-region GPU fleet, deployed a model
+You installed a control plane, built a multi-region GPU fleet, deployed a model
 across it, and ended with one stable endpoint serving requests. The platform
 team published hardware. The ML team described what the model needs. Modelplane
-placed them and served behind a single endpoint.
+placed the model and served it behind that endpoint.
 
 [Clean up]({{< ref "getting-started/clean-up.md" >}}) tears everything down
 when you're done.

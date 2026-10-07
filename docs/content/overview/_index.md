@@ -11,7 +11,7 @@ install and run in your own environment, and it orchestrates the models, serving
 stack, and infrastructure across cloud, neocloud, and on-premise. Modelplane
 supports running any model and any engine on any infrastructure, with the
 frontier-level serving topologies and performance the largest models demand,
-from a single GPU to disaggregated, multi-node deployments.
+from one GPU to disaggregated, multi-node deployments.
 
 Modelplane operates across the whole fleet: provisioning inference clusters,
 scheduling model deployments on compatible clusters, autoscaling model replicas

@@ -12,14 +12,13 @@ to a cluster serving the model it asked for.
 It runs on an `InferenceCluster`, named by `spec.clusterName`. The cluster it
 names can serve models too, or run the gateway alone.
 
-Create as many as you need, one per cluster. A second gateway naming a cluster
-that already has one reports `ClusterAlreadyHasGateway` and doesn't become
-ready. A gateway is where a request enters your fleet, so run one per place
-requests should enter from. `spec.serviceSelector` decides
-which `ModelService`s each one serves. Left unset, a gateway serves every
-service. Scoping a gateway to a region is how you express residency: label a
-service for the EU and it reaches only EU gateways, and from there only the
-endpoints it selects.
+Create as many as you need, one per cluster. A second gateway on a cluster that
+already has one reports `ClusterAlreadyHasGateway` and doesn't become ready. A
+gateway is where a request enters your fleet, so run one per place requests
+should enter from. `spec.serviceSelector` decides which `ModelService`s each one
+serves. Left unset, a gateway serves every service. Scoping a gateway to a
+region is how you express residency: label a service for the EU and it reaches
+only EU gateways, and from there only the endpoints it selects.
 
 Set `spec.tls.certificateRefs` to serve over TLS, with certificates for the names
 callers will use. The names are yours: point your DNS at the address the gateway
@@ -65,8 +64,8 @@ stringData:
 
 ## Run behind another gateway
 
-Without `spec.auth` the gateway authenticates nobody. That's the shape for
-running behind a gateway that already does: the upstream sets the
+Without `spec.auth` the gateway authenticates nobody. That's the configuration
+for running behind a gateway that already does: the upstream sets the
 `x-modelplane-caller` header to name the caller it authenticated, and the
 gateway trusts it. You have to ensure traffic reaches this gateway only through
 that front, so nothing else can set the header.

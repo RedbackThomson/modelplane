@@ -2,7 +2,7 @@
 title: Install
 weight: 8
 navLanding: "Install the control plane"
-description: Stand up the Modelplane control plane on a Kubernetes cluster you run.
+description: Install the Modelplane control plane on a Kubernetes cluster you run.
 ---
 Modelplane's control plane is where everything runs: the Crossplane runtime, the
 providers it provisions infrastructure through, and the composition functions
@@ -74,7 +74,7 @@ functions that reconcile them:
 
 {{< manifests "install/configuration.yaml" >}}
 
-Wait until the configuration is healthy:
+Wait for the configuration to become `Healthy`:
 
 ```bash
 kubectl wait configuration/modelplane --for=condition=Healthy --timeout=5m

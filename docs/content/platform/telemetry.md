@@ -11,27 +11,27 @@ description: Collect normalized metrics across the fleet and send them to any ba
 Modelplane runs an OpenTelemetry collector on every inference cluster. It
 collects from every component Modelplane installs. This includes the inference
 server engine, inference gateway and Envoy proxy, router, and the GPU exporter
-your cloud provides. It renames each component's series to a single
+your cloud provides. It renames each component's series to a common
 `modelplane_*` vocabulary and exports them to wherever you say - any backend the
 collector has an exporter for, not only OTLP.
 
 Modelplane allows you to write one destination for your metrics. You don't need
 to manage per-deployment configurations or update your configuration when a
-deployment changes. The collector finds pods itself, so a leader/worker split or a
-prefill/decode pair is collected the same as a single pod.
+deployment changes. The collector finds pods itself, so a leader/worker split or
+a prefill/decode pair is collected the same way as one pod.
 
 ## Telemetry workflow
 
-Every series carries `cluster`, `job`, and `instance` labels of the target
-resource. A series about a deployment also carries `deployment`, `replica`,
-`namespace`, `engine`, and `role` labels.
+Every series has `cluster`, `job`, and `instance` labels of the target resource.
+A series about a deployment also has `deployment`, `replica`, `namespace`,
+`engine`, and `role` labels.
 
 Each replica publishes its own series, so combine them in your query. Which
 combination is right follows from what the metric measures:
 
  - `sum by (deployment)`, for anything counted, such as requests, tokens, or queue depth.
  - `avg by (deployment)`, for a ratio.
- - `max by (deployment)`, for a saturation figure an alert fires on.
+ - `max by (deployment)`, for a saturation figure you alert on.
 
 To combine:
 
@@ -40,7 +40,8 @@ sum by (deployment) (rate(modelplane_frontend_request_duration_seconds_count[5m]
 ```
 
 The replica is an index rather than a pod, so it's bounded by the replica count
-and survives a restart and a rolling update. Group by `replica`, not by `instance`:
+and doesn't change across a restart or a rolling update. Group by `replica`, not
+by `instance`:
 
 ```promql
 # One line per replica, stable across rolling updates
@@ -109,7 +110,7 @@ kubectl create secret generic telemetry-credentials \
 ```
 
 Reference the Secret from the sink with `secretRef`, and set `auth.bearerTokenKey` to
-the key that holds the token:
+the token's key in the Secret:
 
 ```yaml
 spec:
@@ -124,7 +125,7 @@ spec:
 ```
 
 Modelplane configures the collector to send the token with every export. Rotating the
-token needs no restart.
+token doesn't require a restart.
 
 If you run Prometheus, export to your Prometheus endpoint instead and query the fleet there:
 
@@ -136,8 +137,8 @@ spec:
     endpoint: https://prom.example.internal/api/v1/write
 ```
 
-If you create more than one sink, all get the entire stream. Each sink carries its
-own credential, so a vendor and your own Prometheus don't have to share a Secret.
+If you create more than one sink, all get the entire stream. Credentials are per
+sink, so a vendor and your own Prometheus don't have to share a Secret.
 
 ```yaml
 spec:
@@ -211,14 +212,15 @@ Creating a destination turns collection on everywhere at once, and there's no pe
 opt-out.
 
 Each cluster's collector exports to your backend itself. A cluster needs a route to that
-backend to report. Where a sink names a `secretRef`, you create that Secret once on the
+backend to report. Where a sink sets a `secretRef`, you create that Secret once on the
 control plane and Modelplane copies it to every cluster running a collector, so the
 credential is held on each of them.
 
 ## Computing rates, quantiles, and ratios
 
-A collector transforms each measurement as it passes it on. It holds no history, so it
-produces no rates and no quantiles. Your backend does that. A fleet-wide p99:
+A collector transforms each measurement as it passes it on. It doesn't store past
+measurements, so it can't compute rates or quantiles. Your backend does that. A
+fleet-wide p99:
 
 ```promql
 histogram_quantile(0.99, sum by (le) (
@@ -235,7 +237,7 @@ Modelplane already knows vLLM's and SGLang's metric names and renames them for y
 neither needs anything from you here. SGLang needs two flags: `--enable-metrics` to publish `/metrics` at all, and
 `--collect-tokens-histogram` for the prompt and generation histograms behind
 `modelplane_request_input_tokens` and `modelplane_request_output_tokens`. Without the
-second it publishes those as plain counters and both series stay empty. vLLM needs
+second it publishes those as plain counters and both series are empty. vLLM needs
 nothing.
 
 ```yaml
@@ -268,13 +270,11 @@ spec:
                   --collect-tokens-histogram
 ```
 
-SGLang publishes no queue time per request and no preemption counters, so
-`modelplane_request_queue_seconds` and `modelplane_requests_preempted_total` carry vLLM
-only.
+SGLang doesn't publish request queue time or preemption counters, so only vLLM
+populates `modelplane_request_queue_seconds` and `modelplane_requests_preempted_total`.
 
-Any other OpenAI-compatible engine reports its frontend numbers with no configuration.
-The gateway measures those, not the engine, so `modelplane_frontend_*` works for an
-engine Modelplane has never seen.
+Because the gateway, not the engine, measures the `modelplane_frontend_*` series, they
+work without configuration for an engine Modelplane has never seen.
 
 To normalize that engine's own metrics as well, create a `MetricMapping`:
 
@@ -298,16 +298,15 @@ Modelplane renders every mapping into every cluster's collector, so you write on
 Modelplane leaves the combining to your backend. A scrape of one replica is one batch, so
 a collector that added them up would be summing readings taken at different moments, and
 two readings of one cumulative counter come to twice the traffic that happened. Your
-backend holds every replica's series and combines them at query time.
+backend stores every replica's series and combines them at query time.
 
 Say `fromUnit` whenever the engine measures in something other than the unit the name
 claims, and Modelplane converts to the base one. Skipping this is the expensive mistake here:
 a series named `_seconds` that holds milliseconds reads a thousand times fast, and nothing
 downstream can tell.
 
-Rename only where the measurements agree. Two engines' histograms under one name are worth
-less than nothing if their buckets disagree, because a quantile over them is wrong rather
-than approximate.
+Rename only where the measurements agree. If two engines' histograms share a name and
+their buckets disagree, a quantile over them is wrong rather than approximate.
 
 ### Examples
 

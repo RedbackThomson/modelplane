@@ -120,7 +120,8 @@ You should get a response in a few seconds:
 ## Next step
 
 The platform team declared capacity and in this guide the ML team deployed a
-model behind a stable endpoint. Neither team needed to know what the other was doing. Modelplane matched them.
+model behind a stable endpoint. Each team worked without needing to know what
+the other was doing. Modelplane matched them.
 
 In the next step, the platform team grows the fleet. [Scale the platform]({{< ref "getting-started/scale-the-platform.md" >}}) to add more clusters across regions.
 

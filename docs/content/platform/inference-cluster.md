@@ -73,8 +73,8 @@ An existing cluster must meet what Modelplane would otherwise set up for you:
 - **The `nvidia.com/gpu` taint key, if you taint GPU nodes.** Modelplane's GPU
   workloads tolerate that key. A different taint keeps them off the nodes.
 - **A load balancer.** Modelplane exposes the cluster's serving gateway through a
-  `LoadBalancer` Service, so the cluster needs one that assigns it an external
-  address.
+  `LoadBalancer` Service. The cluster needs a load balancer that assigns the
+  Service an external address.
 - **No conflicting Gateway controller.** Modelplane installs Envoy Gateway and
   owns its `GatewayClass`. Don't run another controller claiming the same class.
 - **A `ReadWriteMany` StorageClass**, if you use a `ModelCache`. See
@@ -99,8 +99,8 @@ run a multi-node gang and distribute its weights:
   LeaderWorkerSet controller, and composes a gang as a Grove `PodCliqueSet` that
   they gang-schedule all-or-nothing and topology-aware. It also runs a
   [ModelExpress](https://github.com/ai-dynamo/modelexpress) server that moves
-  weights between replicas over the fabric, so a later replica pulls a model from
-  a peer's GPU rather than reading storage again.
+  weights between replicas over the fabric. A later replica pulls a model from a
+  peer's GPU rather than reading storage again.
 
 A `ModelDeployment` looks the same on either stack. On `Dynamo` an engine can
 opt into peer-to-peer weight loading with `--load-format modelexpress`. An

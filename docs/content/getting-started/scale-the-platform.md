@@ -80,4 +80,4 @@ its deployment changes in a way that no longer fits where it runs.
 
 ## Next step
 
-The fleet has grown with larger-GPU capacity. The ML team is next. [Scale the model]({{< ref "getting-started/scale-the-model.md" >}}) to serve it across the fleet behind a single endpoint.
+The fleet has grown with larger-GPU capacity. The ML team is next. [Scale the model]({{< ref "getting-started/scale-the-model.md" >}}) to serve it across the fleet behind one endpoint.

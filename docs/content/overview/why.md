@@ -20,7 +20,7 @@ AI workloads, adding device-aware scheduling, multi-node inference, distributed
 serving, and accelerator management. The major open source inference projects are
 converging on it; among them are vLLM, SGLang, NVIDIA Dynamo, llm-d, Ray, Slurm,
 KubeAI, and Kueue. Neoclouds like Baseten and CoreWeave have standardized on
-Kubernetes for their own operations. Inside a single cluster, the open source
+Kubernetes for their own operations. Inside one cluster, the open source
 stack is now strong.
 
 ## Inference is a fleet problem
@@ -32,11 +32,11 @@ across multiple clouds and on-premise environments. Large clusters
 concentrate failure and risk, so fleets of smaller clusters are often preferable,
 and inference workloads don't bin-pack the way other workloads do.
 
-Inference grows into a fleet, and a new set of problems appears above
-any single cluster:
+Inference grows into a fleet, and a new set of problems appears above the
+cluster level:
 
 - Deciding where each model runs across available capacity.
-- Optimizing placement across heterogeneous accelerators.
+- Making the best use of heterogeneous accelerators.
 - Failing over across clouds and regions.
 - Routing by cost, latency, and sovereignty requirements.
 - Provisioning new capacity as demand grows.

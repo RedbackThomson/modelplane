@@ -6,18 +6,17 @@ description: Connect AI assistants and coding agents to the Modelplane docs thro
 <!-- vale write-good.TooWordy = NO -->
 The Modelplane docs are built to be read by AI assistants as well as people. You
 can connect a coding agent directly to this site, pull any page as Markdown, or
-point a model at a single index file that lists the whole documentation set.
-Every page also carries a **Copy page** menu next to its title with the same
-shortcuts.
+point a model at an index file that lists the whole documentation set. A
+**Copy page** menu next to each page's title offers the same shortcuts.
 
 ## Connect to the MCP server
 
 The documentation MCP server lets an assistant search these docs and read any
-page in real time, so its answers track the current content instead of its
-training data. It exposes two tools:
+page in real time, rather than answer from its training data. It exposes two
+tools:
 
 - `search_modelplane_docs`: search the docs and get back the most relevant sections with their titles, URLs, and snippets.
-- `get_modelplane_doc`: fetch the full Markdown of a single page.
+- `get_modelplane_doc`: fetch the full Markdown of one page.
 
 The server URL is:
 
@@ -64,7 +63,7 @@ Create `.vscode/mcp.json` in your workspace:
 ```
 {{< /tab >}}
 {{< tab "Other" >}}
-Any MCP client that speaks the streamable HTTP transport can connect to the server URL directly. No authentication is required.
+Any MCP client that speaks the streamable HTTP transport can connect to the server URL directly, without authenticating.
 {{< /tab >}}
 {{< /tabs >}}
 
