@@ -190,9 +190,8 @@ tolerations accept every `NoSchedule` taint, including `modelplane.ai/cpu`, so
 the `nodeSelector` is what keeps the driver off GPU pools and the system pool,
 not their taints.
 
-The design depends on dra-driver-cpu 0.3.0 which is due to be released within
-the next few days. Without 0.3.0, we cannot use `nodeSelector` or `affinity` to
-support targetting the correct nodes.
+0.3.0 is the oldest chart the design supports. Earlier charts expose neither
+`nodeSelector` nor `affinity`, so they can't keep the driver to `CPU` pools.
 
 The driver is not part of the AICR-generated stacks. The generator only
 classifies AICR's own components, and the `stacks-current` check would
