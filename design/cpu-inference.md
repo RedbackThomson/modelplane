@@ -206,6 +206,15 @@ vCPUs less two. I propose a fixed value, documented with the InferenceClass,
 over a per-pool one. A per-pool value would have to be kept in step with the
 class by hand, which is the same problem in a less visible place.
 
+### Pool status
+
+InferenceCluster defines a `status.gpuPools` which declare the pools which can
+be scheduled to. It lists every pool whose class declares a device, so it
+will list CPU pools too, and nothing in an entry is specific to GPUs. I propose
+renaming it to `status.schedulablePools`. `status.nodePools` would mirror
+`spec.nodePools` more closely, but the schema generator already names the spec
+item `NodePool`, and the status item would need a different name.
+
 ### Capacity requests
 
 Today a member's device request has a name, a count and CEL selectors, and the
@@ -246,9 +255,6 @@ These don't block serving, but behave differently on a CPU node:
 - The endpoint picker assumes a KV block size of 16 when the engine doesn't
   state one. vLLM's CPU backend may default to another size, which would
   degrade prefix-cache routing; recipes should pass `--block-size`.
-- `status.gpuPools` on InferenceCluster will list CPU pools. Its content is
-  already generic. I propose loosening its description rather than renaming a
-  field the scheduler reads.
 
 ## Testing
 
@@ -259,9 +265,10 @@ haven't tried, an e2e case can run a CPU pool on an `Existing` cluster: a
 deployment whose member selects on `dra.cpu` capacity.
 
 Unit tests change in `compose-inference-cluster` (role and projection per
-source), each cloud cluster function (the `CPU` role and taint),
-`compose-serving-stack` (the transform, including that a cluster with no CPU
-pool composes nothing new) and `compose-model-replica` (the toleration).
+source, and the renamed status field), each cloud cluster function (the `CPU`
+role and taint), `compose-serving-stack` (the transform, including that a
+cluster with no CPU pool composes nothing new), `compose-model-replica` (the
+toleration) and `compose-model-deployment` (the renamed status field).
 
 ## Alternatives considered
 
