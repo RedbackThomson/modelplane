@@ -26,6 +26,10 @@ dev = [
   # schemas/ tree, so an edit there survives until the next build.
   "pyyaml>=6.0",
   "pydantic>=2.0",
+  # 9.0 reports unittest subtests natively.
+  "pytest>=9.0",
+  # The end-to-end tests read the clusters through the Kubernetes API.
+  "kubernetes>=36.0",
 ]
 
 [tool.ruff]
@@ -55,8 +59,12 @@ select = [
     "TID",    # flake8-tidy-imports (no relative imports)
     "BLE",    # flake8-blind-except (no bare except Exception)
     "ANN",    # flake8-annotations (require type annotations)
+    "PT",     # flake8-pytest-style (pytest idioms, no unittest assertions)
     "RUF",    # ruff-specific rules (incl. unused/malformed noqa)
 ]
+# The function unit test checker (hack/check_function_tests.py) takes its
+# escapes as noqa codes, which ruff would otherwise reject as unknown.
+external = ["MPT"]
 
 [tool.ruff.lint.pylint]
 # Builder functions like helm_release use named parameters for clarity.
@@ -70,13 +78,19 @@ allow-star-arg-any = true
 [tool.ruff.lint.per-file-ignores]
 # Generated models are not under our control.
 "schemas/python/**" = ["ALL"]
-# Tests use magic values, many parameters, long hardcoded resource dicts, and
-# boolean fixture toggles passed positionally.
-"**/tests/**" = ["E501", "PLR2004", "PLR0913", "FBT001"]
+# Function tests use magic values, many parameters, long hardcoded resource
+# dicts, and boolean fixture toggles passed positionally.
+"functions/*/tests/**" = ["E501", "PLR2004", "PLR0913", "FBT001"]
+# The end-to-end tests compare HTTP statuses and curl exit codes.
+"e2e/**" = ["PLR2004"]
+# The pytest style rules are for tests. Elsewhere an assert guards an invariant.
+"!{**/tests/**,e2e/**}" = ["PT"]
 # fn.py uses gRPC's required PascalCase method name.
 "functions/*/function/fn.py" = ["N802"]
 # The docs manifest validator is a CLI script; print is its output.
 "docs/utils/validate/**" = ["T201"]
+# The function unit test checker is a CLI script; print is its output.
+"hack/check_function_tests.py" = ["T201"]
 # Generated serving stack lists carry upstream chart values verbatim; long
 # string literals and unicode arrive from the recipes.
 "functions/*/function/stacks/clouds/generated/**" = ["E501", "RUF001", "RUF002", "RUF003"]
@@ -94,3 +108,13 @@ python-version = "3.12"
 [tool.ty.src]
 # The generated Pydantic models aren't under our control and aren't checked.
 exclude = ["schemas/python"]
+
+[tool.pytest]
+# Fail on unknown config, unregistered markers, duplicate parametrize IDs and
+# passing xfails.
+strict = true
+# Tests compare whole responses, and by default pytest cuts the diff between two
+# large values down to a summary line.
+verbosity_assertions = "2"
+# List each test by name as it runs.
+addopts = ["-v"]

@@ -14,15 +14,17 @@
 
 """Tests for the compose-civo-cluster function."""
 
+import asyncio
 import dataclasses
-import unittest
+import json
 from typing import Any
 
-from crossplane.function import logging, resource
+import pytest
+from crossplane.function import resource
 from crossplane.function.proto.v1 import run_function_pb2 as fnv1
 from function import fn
 from google.protobuf import duration_pb2 as durationpb
-from google.protobuf import json_format
+from google.protobuf import json_format, message
 from google.protobuf import struct_pb2 as structpb
 from models.ai.modelplane.infrastructure.civocluster import v1alpha1
 from models.io.k8s.apimachinery.pkg.apis.meta import v1 as metav1
@@ -33,440 +35,529 @@ class Case:
     """A test case for compose-civo-cluster."""
 
     name: str
+    reason: str
     req: fnv1.RunFunctionRequest
     want: fnv1.RunFunctionResponse
 
 
-def setUpModule() -> None:
-    logging.configure(level=logging.Level.DISABLED)
-
-
-# Name of the cluster's connection secret. Derived like the function derives
-# it - the hash suffix depends only on the parent and child names.
-_KUBECONFIG_SECRET_NAME = resource.child_name("test-cluster", "kubeconfig")
-
-# The system node pool injected inline into every cluster.
-_SYSTEM_POOL = {
-    "label": "system",
-    "size": "g4p.kube.small",
-    "nodeCount": 2,
-    "labels": {"modelplane.ai/pool": "system"},
-}
-
-# The taint every GPU pool carries.
-_GPU_TAINT = [
-    {"key": "nvidia.com/gpu", "value": "true", "effect": "NoSchedule"},
-]
-
-# Civo IDs the provider writes to external-name annotations once resources
-# exist. The autoscaler addresses node groups by pool ID.
-_CLUSTER_ID = "11111111-2222-3333-4444-555555555555"
-_GPU_POOL_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-
-
-def _xr(pools: list[v1alpha1.NodePool]) -> dict:
-    """A CivoCluster XR with the given node pools, as a request dict."""
-    return v1alpha1.CivoCluster(
+def _xr(*, credentials: v1alpha1.Credentials | None, node_pools: list[v1alpha1.NodePool]) -> fnv1.Resource:
+    """The observed CivoCluster XR in LON1, with the given credentials and node pools."""
+    xr = v1alpha1.CivoCluster(
         metadata=metav1.ObjectMeta(
             name="test-cluster",
             namespace="modelplane-system",
         ),
         spec=v1alpha1.Spec(
             region="LON1",
-            nodePools=pools,
+            credentials=credentials,
+            nodePools=node_pools,
         ),
-    ).model_dump(exclude_none=True, mode="json")
+    )
+    return fnv1.Resource(resource=resource.dict_to_struct(xr.model_dump(exclude_none=True, mode="json", by_alias=True)))
 
 
-def _req(
-    pools: list[v1alpha1.NodePool],
-    observed_resources: dict[str, fnv1.Resource] | None = None,
-) -> fnv1.RunFunctionRequest:
-    return fnv1.RunFunctionRequest(
-        observed=fnv1.State(
-            composite=fnv1.Resource(resource=resource.dict_to_struct(_xr(pools))),
-            resources=observed_resources or {},
+def _desired_xr() -> fnv1.Resource:
+    """The desired XR, publishing the cluster's kubeconfig Secret."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "status": {
+                    "secrets": [
+                        {
+                            "type": "Kubeconfig",
+                            "name": "test-cluster-kubeconfig-55b57",
+                            "key": "kubeconfig",
+                        },
+                    ],
+                },
+            }
         ),
     )
 
 
-def _network(
-    cred_kind: str = "ClusterProviderConfig",
-    cred_name: str = "default",
-) -> dict:
-    """A Network golden."""
-    return {
-        "apiVersion": "vpc.civo.m.upbound.io/v1beta1",
-        "kind": "Network",
-        "spec": {
-            "providerConfigRef": {"kind": cred_kind, "name": cred_name},
-            "forProvider": {
-                "label": "test-cluster",
-                "region": "LON1",
-            },
-        },
-    }
-
-
-def _firewall(
-    cred_kind: str = "ClusterProviderConfig",
-    cred_name: str = "default",
-) -> dict:
-    """A Firewall golden with Civo's default rules."""
-    return {
-        "apiVersion": "vpc.civo.m.upbound.io/v1beta1",
-        "kind": "Firewall",
-        "spec": {
-            "providerConfigRef": {"kind": cred_kind, "name": cred_name},
-            "forProvider": {
-                "name": "test-cluster",
-                "region": "LON1",
-                "createDefaultRules": True,
-                "networkIdSelector": {"matchControllerRef": True},
-            },
-        },
-    }
-
-
-def _cluster(
-    cred_kind: str = "ClusterProviderConfig",
-    cred_name: str = "default",
-) -> dict:
-    """A Cluster golden with only the system pool."""
-    return {
-        "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
-        "kind": "Cluster",
-        "spec": {
-            "providerConfigRef": {"kind": cred_kind, "name": cred_name},
-            "forProvider": {
-                "name": "test-cluster",
-                "region": "LON1",
-                "cni": "cilium",
-                "applications": "-traefik2-nodeport",
-                "writeKubeconfig": True,
-                "networkIdSelector": {"matchControllerRef": True},
-                "firewallIdSelector": {"matchControllerRef": True},
-                "pools": _SYSTEM_POOL,
-            },
-            "writeConnectionSecretToRef": {"name": _KUBECONFIG_SECRET_NAME},
-        },
-    }
-
-
-def _provider_config_helm() -> dict:
-    """A provider-helm ProviderConfig golden pointing at the kubeconfig."""
-    return {
-        "apiVersion": "helm.m.crossplane.io/v1beta1",
-        "kind": "ProviderConfig",
-        "metadata": {
-            "name": _KUBECONFIG_SECRET_NAME,
-            "namespace": "modelplane-system",
-        },
-        "spec": {
-            "credentials": {
-                "source": "Secret",
-                "secretRef": {
-                    "namespace": "modelplane-system",
-                    "name": _KUBECONFIG_SECRET_NAME,
-                    "key": "kubeconfig",
+def _network(*, cred_kind: str, cred_name: str) -> fnv1.Resource:
+    """The composed Network."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "vpc.civo.m.upbound.io/v1beta1",
+                "kind": "Network",
+                "spec": {
+                    "providerConfigRef": {"kind": cred_kind, "name": cred_name},
+                    "forProvider": {
+                        "label": "test-cluster",
+                        "region": "LON1",
+                    },
                 },
-            },
-        },
-    }
+            }
+        ),
+    )
 
 
-def _autoscaler(groups: list[dict]) -> dict:
-    """The cluster autoscaler Release golden for the given node groups."""
-    return {
-        "apiVersion": "helm.m.crossplane.io/v1beta1",
-        "kind": "Release",
-        "metadata": {"namespace": "modelplane-system"},
-        "spec": {
-            "managementPolicies": ["Observe", "Create", "Update"],
-            "providerConfigRef": {
-                "kind": "ProviderConfig",
-                "name": _KUBECONFIG_SECRET_NAME,
-            },
-            "forProvider": {
-                "chart": {
-                    "name": "cluster-autoscaler",
-                    "repository": "https://kubernetes.github.io/autoscaler",
-                    "version": "9.57.0",
+def _firewall(*, cred_kind: str, cred_name: str) -> fnv1.Resource:
+    """The composed Firewall, with Civo's default rules."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "vpc.civo.m.upbound.io/v1beta1",
+                "kind": "Firewall",
+                "spec": {
+                    "providerConfigRef": {"kind": cred_kind, "name": cred_name},
+                    "forProvider": {
+                        "name": "test-cluster",
+                        "region": "LON1",
+                        "createDefaultRules": True,
+                        "networkIdSelector": {"matchControllerRef": True},
+                    },
                 },
-                "namespace": "kube-system",
-                "values": {
-                    "cloudProvider": "civo",
-                    "autoscalingGroups": groups,
-                    "secretKeyRefNameOverride": "civo-api-access",
+            }
+        ),
+    )
+
+
+def _cluster(*, cred_kind: str, cred_name: str, ready: fnv1.Ready) -> fnv1.Resource:
+    """The composed Civo Cluster."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
+                "kind": "Cluster",
+                "spec": {
+                    "providerConfigRef": {"kind": cred_kind, "name": cred_name},
+                    "forProvider": {
+                        "name": "test-cluster",
+                        "region": "LON1",
+                        "cni": "cilium",
+                        "applications": "-traefik2-nodeport",
+                        "writeKubeconfig": True,
+                        "networkIdSelector": {"matchControllerRef": True},
+                        "firewallIdSelector": {"matchControllerRef": True},
+                        # The system node pool the function adds inline to every cluster.
+                        "pools": {
+                            "label": "system",
+                            "size": "g4p.kube.small",
+                            "nodeCount": 2,
+                            "labels": {"modelplane.ai/pool": "system"},
+                        },
+                    },
+                    "writeConnectionSecretToRef": {"name": "test-cluster-kubeconfig-55b57"},
                 },
-            },
-        },
-    }
+            }
+        ),
+        ready=ready,
+    )
 
 
-def _node_pool(
-    label: str,
-    size: str,
-    node_count: int,
-    labels: dict[str, str],
-    taint: list | None = None,
-    cred_kind: str = "ClusterProviderConfig",
-    cred_name: str = "default",
+def _observed_cluster(*, cred_kind: str, cred_name: str, ready: bool) -> fnv1.Resource:
+    """The Civo Cluster as observed, with its Civo ID, and a Ready condition that's True if ready and False if not."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
+                "kind": "Cluster",
+                "metadata": {
+                    "annotations": {"crossplane.io/external-name": "11111111-2222-3333-4444-555555555555"},
+                },
+                "spec": {
+                    "providerConfigRef": {"kind": cred_kind, "name": cred_name},
+                    "forProvider": {
+                        "name": "test-cluster",
+                        "region": "LON1",
+                        "cni": "cilium",
+                        "applications": "-traefik2-nodeport",
+                        "writeKubeconfig": True,
+                        "networkIdSelector": {"matchControllerRef": True},
+                        "firewallIdSelector": {"matchControllerRef": True},
+                        "pools": {
+                            "label": "system",
+                            "size": "g4p.kube.small",
+                            "nodeCount": 2,
+                            "labels": {"modelplane.ai/pool": "system"},
+                        },
+                    },
+                    "writeConnectionSecretToRef": {"name": "test-cluster-kubeconfig-55b57"},
+                },
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "True" if ready else "False",
+                            "reason": "Available" if ready else "Unavailable",
+                            "lastTransitionTime": "2024-01-01T00:00:00Z",
+                        },
+                    ],
+                },
+            }
+        ),
+    )
+
+
+def _node_pool_gpu(
     *,
-    autoscaled: bool = False,
-) -> dict:
-    """A NodePool golden. Autoscaled pools seed nodeCount via initProvider
-    so the autoscaler owns it after creation; fixed pools keep it in
-    forProvider."""
-    fp: dict[str, Any] = {
-        "label": label,
-        "size": size,
+    management_policies: list[str] | None,
+    init_node_count: int | None,
+    node_count: int | None,
+    ready: fnv1.Ready,
+) -> fnv1.Resource:
+    """The composed NodePool for the gpu-l40s pool.
+
+    An autoscaled pool's nodeCount is in initProvider, and its management
+    policies leave out LateInitialize, so the cluster autoscaler owns the count
+    once the pool exists. A fixed-size pool's nodeCount is in forProvider.
+    """
+    for_provider: dict[str, Any] = {
+        "label": "gpu-l40s",
+        "size": "an.g1.l40s.kube.x1",
         "region": "LON1",
-        "labels": labels,
+        "labels": {
+            "modelplane.ai/pool": "gpu-l40s",
+            "modelplane.ai/gpu": "nvidia-l40s",
+        },
         "clusterIdSelector": {"matchControllerRef": True},
+        "taint": [{"key": "nvidia.com/gpu", "value": "true", "effect": "NoSchedule"}],
     }
-    if taint:
-        fp["taint"] = taint
+    if node_count is not None:
+        for_provider["nodeCount"] = node_count
     spec: dict[str, Any] = {
-        "providerConfigRef": {"kind": cred_kind, "name": cred_name},
-        "forProvider": fp,
+        "providerConfigRef": {"kind": "ClusterProviderConfig", "name": "default"},
+        "forProvider": for_provider,
     }
-    if autoscaled:
-        spec["managementPolicies"] = ["Observe", "Create", "Update", "Delete"]
-        spec["initProvider"] = {"nodeCount": node_count}
-    else:
-        fp["nodeCount"] = node_count
-    return {
-        "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
-        "kind": "NodePool",
-        "spec": spec,
-    }
+    if management_policies is not None:
+        spec["managementPolicies"] = management_policies
+    if init_node_count is not None:
+        spec["initProvider"] = {"nodeCount": init_node_count}
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
+                "kind": "NodePool",
+                "spec": spec,
+            }
+        ),
+        ready=ready,
+    )
 
 
-def _status() -> dict:
-    return {
-        "status": {
-            "secrets": [
-                {
-                    "type": "Kubeconfig",
-                    "name": _KUBECONFIG_SECRET_NAME,
-                    "key": "kubeconfig",
+def _provider_config() -> fnv1.Resource:
+    """The composed provider-helm ProviderConfig for the cluster, which is always ready."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "helm.m.crossplane.io/v1beta1",
+                "kind": "ProviderConfig",
+                "metadata": {
+                    "name": "test-cluster-kubeconfig-55b57",
+                    "namespace": "modelplane-system",
                 },
-            ],
-        },
-    }
-
-
-def _observed(desired: dict, ready: str, external_name: str | None = None) -> fnv1.Resource:
-    """An observed variant of a desired resource with a Ready condition and
-    optionally the external-name annotation the provider sets."""
-    observed: dict[str, Any] = {
-        **desired,
-        "status": {
-            "conditions": [
-                {
-                    "type": "Ready",
-                    "status": ready,
-                    "reason": "Available" if ready == "True" else "Unavailable",
-                    "lastTransitionTime": "2024-01-01T00:00:00Z",
+                "spec": {
+                    "credentials": {
+                        "source": "Secret",
+                        "secretRef": {
+                            "namespace": "modelplane-system",
+                            "name": "test-cluster-kubeconfig-55b57",
+                            "key": "kubeconfig",
+                        },
+                    },
                 },
-            ],
-        },
-    }
-    if external_name is not None:
-        metadata = {**observed.get("metadata", {})}
-        metadata["annotations"] = {"crossplane.io/external-name": external_name}
-        observed["metadata"] = metadata
-    return fnv1.Resource(resource=resource.dict_to_struct(observed))
+            }
+        ),
+        ready=fnv1.READY_TRUE,
+    )
 
 
-def _observed_ready(desired: dict, external_name: str | None = None) -> fnv1.Resource:
-    return _observed(desired, "True", external_name)
-
-
-def _observed_unready(desired: dict, external_name: str | None = None) -> fnv1.Resource:
-    return _observed(desired, "False", external_name)
-
-
-_GPU_POOL = v1alpha1.NodePool(
-    name="gpu-l40s",
-    role="GPU",
-    size="an.g1.l40s.kube.x1",
-    maxNodeCount=4,
-    gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
-)
-
-_GPU_POOL_GOLDEN = _node_pool(
-    label="gpu-l40s",
-    size="an.g1.l40s.kube.x1",
-    node_count=1,
-    labels={
-        "modelplane.ai/pool": "gpu-l40s",
-        "modelplane.ai/gpu": "nvidia-l40s",
-    },
-    taint=_GPU_TAINT,
-    autoscaled=True,
-)
-
-
-class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
-    """Tests for FunctionRunner.RunFunction."""
-
-    maxDiff = None
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
-
-    async def test_compose(self) -> None:
-        """The function composes Civo cluster infrastructure."""
-        cases = [
-            Case(
-                name="network, firewall and cluster composed first; node pools withheld until cluster Ready",
-                req=_req([_GPU_POOL]),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                            ),
-                        },
-                    ),
-                    context=structpb.Struct(),
-                ),
-            ),
-            Case(
-                name="node pools and provider config composed once cluster is Ready; autoscaler has no groups until pool IDs observed",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
+def _autoscaler_release(*, autoscaling_groups: list[dict]) -> fnv1.Resource:
+    """The composed cluster autoscaler Release, scaling the given node groups."""
+    return fnv1.Resource(
+        resource=resource.dict_to_struct(
+            {
+                "apiVersion": "helm.m.crossplane.io/v1beta1",
+                "kind": "Release",
+                "metadata": {"namespace": "modelplane-system"},
+                "spec": {
+                    "managementPolicies": ["Observe", "Create", "Update"],
+                    "providerConfigRef": {
+                        "kind": "ProviderConfig",
+                        "name": "test-cluster-kubeconfig-55b57",
                     },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
+                    "forProvider": {
+                        "chart": {
+                            "name": "cluster-autoscaler",
+                            "repository": "https://kubernetes.github.io/autoscaler",
+                            "version": "9.57.0",
                         },
-                    ),
-                    context=structpb.Struct(),
-                ),
-            ),
-            Case(
-                name="autoscaler release composed from observed pool IDs",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
-                        "node-pool-gpu-l40s": _observed_ready(_GPU_POOL_GOLDEN, external_name=_GPU_POOL_ID),
+                        "namespace": "kube-system",
+                        "values": {
+                            "cloudProvider": "civo",
+                            "autoscalingGroups": autoscaling_groups,
+                            "secretKeyRefNameOverride": "civo-api-access",
+                        },
                     },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _autoscaler(
-                                        [{"name": _GPU_POOL_ID, "minSize": 1, "maxSize": 4}],
-                                    ),
-                                ),
-                            ),
-                        },
-                    ),
-                    context=structpb.Struct(),
+                },
+            }
+        ),
+    )
+
+
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
+
+
+COMPOSE_CASES = [
+    Case(
+        name="FirstPass",
+        reason="With nothing observed, a CivoCluster composes the network, firewall and cluster, and withholds the node pools, ProviderConfig and autoscaler until the cluster is Ready.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=None,
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="gpu-l40s",
+                            role="GPU",
+                            size="an.g1.l40s.kube.x1",
+                            maxNodeCount=4,
+                            gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
+                        ),
+                    ],
                 ),
             ),
-            Case(
-                name="dependents kept when the cluster Ready condition transiently regresses",
-                req=_req(
-                    [_GPU_POOL],
-                    observed_resources={
-                        "cluster": _observed_unready(_cluster(), external_name=_CLUSTER_ID),
-                        "provider-config-helm": _observed_ready(_provider_config_helm()),
-                    },
-                ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(_GPU_POOL_GOLDEN),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "firewall": _firewall(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "cluster": _cluster(
+                        cred_kind="ClusterProviderConfig", cred_name="default", ready=fnv1.READY_UNSPECIFIED
                     ),
-                    context=structpb.Struct(),
-                ),
+                },
             ),
-            Case(
-                name="fixed-size GPU pool composes the autoscaler release with no node groups",
-                req=_req(
-                    [
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="ClusterReady",
+        reason="With the cluster observed Ready, a CivoCluster composes the node pools, ProviderConfig and autoscaler, which has no node groups until a pool's Civo ID is observed.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=None,
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="gpu-l40s",
+                            role="GPU",
+                            size="an.g1.l40s.kube.x1",
+                            maxNodeCount=4,
+                            gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
+                        ),
+                    ],
+                ),
+                resources={
+                    "cluster": _observed_cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=True),
+                },
+            ),
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "firewall": _firewall(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "cluster": _cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=fnv1.READY_TRUE),
+                    "node-pool-gpu-l40s": _node_pool_gpu(
+                        management_policies=["Observe", "Create", "Update", "Delete"],
+                        init_node_count=1,
+                        node_count=None,
+                        ready=fnv1.READY_UNSPECIFIED,
+                    ),
+                    "provider-config-helm": _provider_config(),
+                    "release-cluster-autoscaler": _autoscaler_release(autoscaling_groups=[]),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    # The autoscaler addresses node groups by the pool ID the provider writes
+    # to the NodePool's external-name annotation once the pool exists. The pool
+    # leaves nodeCount at its default of 1, so this case can't tell a floor
+    # taken from nodeCount from one fixed at 1.
+    Case(
+        name="PoolIDObserved",
+        reason="With the GPU pool observed Ready under its Civo ID, a CivoCluster marks the pool ready and has the autoscaler scale that ID from one node to its maxNodeCount.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=None,
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="gpu-l40s",
+                            role="GPU",
+                            size="an.g1.l40s.kube.x1",
+                            maxNodeCount=4,
+                            gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
+                        ),
+                    ],
+                ),
+                resources={
+                    "cluster": _observed_cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=True),
+                    "node-pool-gpu-l40s": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
+                                "kind": "NodePool",
+                                "metadata": {
+                                    "annotations": {
+                                        "crossplane.io/external-name": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                                    },
+                                },
+                                "spec": {
+                                    "providerConfigRef": {"kind": "ClusterProviderConfig", "name": "default"},
+                                    "managementPolicies": ["Observe", "Create", "Update", "Delete"],
+                                    "initProvider": {"nodeCount": 1},
+                                    "forProvider": {
+                                        "label": "gpu-l40s",
+                                        "size": "an.g1.l40s.kube.x1",
+                                        "region": "LON1",
+                                        "labels": {
+                                            "modelplane.ai/pool": "gpu-l40s",
+                                            "modelplane.ai/gpu": "nvidia-l40s",
+                                        },
+                                        "clusterIdSelector": {"matchControllerRef": True},
+                                        "taint": [{"key": "nvidia.com/gpu", "value": "true", "effect": "NoSchedule"}],
+                                    },
+                                },
+                                "status": {
+                                    "conditions": [
+                                        {
+                                            "type": "Ready",
+                                            "status": "True",
+                                            "reason": "Available",
+                                            "lastTransitionTime": "2024-01-01T00:00:00Z",
+                                        },
+                                    ],
+                                },
+                            }
+                        ),
+                    ),
+                },
+            ),
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "firewall": _firewall(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "cluster": _cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=fnv1.READY_TRUE),
+                    "node-pool-gpu-l40s": _node_pool_gpu(
+                        management_policies=["Observe", "Create", "Update", "Delete"],
+                        init_node_count=1,
+                        node_count=None,
+                        ready=fnv1.READY_TRUE,
+                    ),
+                    "provider-config-helm": _provider_config(),
+                    "release-cluster-autoscaler": _autoscaler_release(
+                        autoscaling_groups=[
+                            {"name": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "minSize": 1, "maxSize": 4}
+                        ],
+                    ),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    # The observed ProviderConfig shows the dependents were composed before.
+    # Dropping them would delete the NodePools, and deprovision their nodes.
+    Case(
+        name="ClusterReadyRegressed",
+        reason="With the cluster's Ready condition regressed to False but its ProviderConfig observed, a CivoCluster keeps the node pools, ProviderConfig and autoscaler composed.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=None,
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="gpu-l40s",
+                            role="GPU",
+                            size="an.g1.l40s.kube.x1",
+                            maxNodeCount=4,
+                            gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
+                        ),
+                    ],
+                ),
+                resources={
+                    "cluster": _observed_cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=False),
+                    "provider-config-helm": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "helm.m.crossplane.io/v1beta1",
+                                "kind": "ProviderConfig",
+                                "metadata": {
+                                    "name": "test-cluster-kubeconfig-55b57",
+                                    "namespace": "modelplane-system",
+                                },
+                                "spec": {
+                                    "credentials": {
+                                        "source": "Secret",
+                                        "secretRef": {
+                                            "namespace": "modelplane-system",
+                                            "name": "test-cluster-kubeconfig-55b57",
+                                            "key": "kubeconfig",
+                                        },
+                                    },
+                                },
+                                "status": {
+                                    "conditions": [
+                                        {
+                                            "type": "Ready",
+                                            "status": "True",
+                                            "reason": "Available",
+                                            "lastTransitionTime": "2024-01-01T00:00:00Z",
+                                        },
+                                    ],
+                                },
+                            }
+                        ),
+                    ),
+                },
+            ),
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "firewall": _firewall(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "cluster": _cluster(
+                        cred_kind="ClusterProviderConfig", cred_name="default", ready=fnv1.READY_UNSPECIFIED
+                    ),
+                    "node-pool-gpu-l40s": _node_pool_gpu(
+                        management_policies=["Observe", "Create", "Update", "Delete"],
+                        init_node_count=1,
+                        node_count=None,
+                        ready=fnv1.READY_UNSPECIFIED,
+                    ),
+                    "provider-config-helm": _provider_config(),
+                    "release-cluster-autoscaler": _autoscaler_release(autoscaling_groups=[]),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    Case(
+        name="FixedSizePool",
+        reason="A CivoCluster with a GPU pool that sets nodeCount but no maxNodeCount puts that nodeCount in forProvider under the default management policies, and still composes the autoscaler with no node groups.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=None,
+                    node_pools=[
                         v1alpha1.NodePool(
                             name="gpu-l40s",
                             role="GPU",
@@ -475,140 +566,95 @@ class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
                             gpu=v1alpha1.Gpu(acceleratorType="nvidia-l40s"),
                         ),
                     ],
-                    observed_resources={
-                        "cluster": _observed_ready(_cluster(), external_name=_CLUSTER_ID),
-                    },
                 ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(_network()),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(_firewall()),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(_cluster()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-gpu-l40s": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _node_pool(
-                                        label="gpu-l40s",
-                                        size="an.g1.l40s.kube.x1",
-                                        node_count=2,
-                                        labels={
-                                            "modelplane.ai/pool": "gpu-l40s",
-                                            "modelplane.ai/gpu": "nvidia-l40s",
-                                        },
-                                        taint=_GPU_TAINT,
-                                    ),
-                                ),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
-                    ),
-                    context=structpb.Struct(),
-                ),
+                resources={
+                    "cluster": _observed_cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=True),
+                },
             ),
-            Case(
-                name="System pool carries no taint; credentials override propagates",
-                req=fnv1.RunFunctionRequest(
-                    observed=fnv1.State(
-                        composite=fnv1.Resource(
-                            resource=resource.dict_to_struct(
-                                v1alpha1.CivoCluster(
-                                    metadata=metav1.ObjectMeta(
-                                        name="test-cluster",
-                                        namespace="modelplane-system",
-                                    ),
-                                    spec=v1alpha1.Spec(
-                                        region="LON1",
-                                        credentials=v1alpha1.Credentials(
-                                            type="ProviderConfig",
-                                            name="team-a",
-                                        ),
-                                        nodePools=[
-                                            v1alpha1.NodePool(
-                                                name="workers",
-                                                role="System",
-                                                size="g4p.kube.small",
-                                                nodeCount=2,
-                                            ),
-                                        ],
-                                    ),
-                                ).model_dump(exclude_none=True, mode="json"),
-                            ),
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "firewall": _firewall(cred_kind="ClusterProviderConfig", cred_name="default"),
+                    "cluster": _cluster(cred_kind="ClusterProviderConfig", cred_name="default", ready=fnv1.READY_TRUE),
+                    "node-pool-gpu-l40s": _node_pool_gpu(
+                        management_policies=None,
+                        init_node_count=None,
+                        node_count=2,
+                        ready=fnv1.READY_UNSPECIFIED,
+                    ),
+                    "provider-config-helm": _provider_config(),
+                    "release-cluster-autoscaler": _autoscaler_release(autoscaling_groups=[]),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+    # The helm ProviderConfig and the Release reach the cluster through its
+    # kubeconfig, so they don't carry the Civo credentials.
+    Case(
+        name="CustomCredentials",
+        reason="A CivoCluster naming its own ProviderConfig gets it on every Civo resource, and its System-role pool gets no GPU label or taint.",
+        req=fnv1.RunFunctionRequest(
+            observed=fnv1.State(
+                composite=_xr(
+                    credentials=v1alpha1.Credentials(type="ProviderConfig", name="team-a"),
+                    node_pools=[
+                        v1alpha1.NodePool(
+                            name="workers",
+                            role="System",
+                            size="g4p.kube.small",
+                            nodeCount=2,
                         ),
-                        resources={
-                            "cluster": _observed_ready(
-                                _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
-                                external_name=_CLUSTER_ID,
-                            ),
-                        },
-                    ),
+                    ],
                 ),
-                want=fnv1.RunFunctionResponse(
-                    meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
-                    desired=fnv1.State(
-                        composite=fnv1.Resource(resource=resource.dict_to_struct(_status())),
-                        resources={
-                            "network": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _network(cred_kind="ProviderConfig", cred_name="team-a"),
-                                ),
-                            ),
-                            "firewall": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _firewall(cred_kind="ProviderConfig", cred_name="team-a"),
-                                ),
-                            ),
-                            "cluster": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _cluster(cred_kind="ProviderConfig", cred_name="team-a"),
-                                ),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "node-pool-workers": fnv1.Resource(
-                                resource=resource.dict_to_struct(
-                                    _node_pool(
-                                        label="workers",
-                                        size="g4p.kube.small",
-                                        node_count=2,
-                                        labels={"modelplane.ai/pool": "workers"},
-                                        cred_kind="ProviderConfig",
-                                        cred_name="team-a",
-                                    ),
-                                ),
-                            ),
-                            "provider-config-helm": fnv1.Resource(
-                                resource=resource.dict_to_struct(_provider_config_helm()),
-                                ready=fnv1.READY_TRUE,
-                            ),
-                            "release-cluster-autoscaler": fnv1.Resource(
-                                resource=resource.dict_to_struct(_autoscaler([])),
-                            ),
-                        },
-                    ),
-                    context=structpb.Struct(),
-                ),
+                resources={
+                    "cluster": _observed_cluster(cred_kind="ProviderConfig", cred_name="team-a", ready=True),
+                },
             ),
-        ]
+        ),
+        want=fnv1.RunFunctionResponse(
+            meta=fnv1.ResponseMeta(ttl=durationpb.Duration(seconds=60)),
+            desired=fnv1.State(
+                composite=_desired_xr(),
+                resources={
+                    "network": _network(cred_kind="ProviderConfig", cred_name="team-a"),
+                    "firewall": _firewall(cred_kind="ProviderConfig", cred_name="team-a"),
+                    "cluster": _cluster(cred_kind="ProviderConfig", cred_name="team-a", ready=fnv1.READY_TRUE),
+                    "node-pool-workers": fnv1.Resource(
+                        resource=resource.dict_to_struct(
+                            {
+                                "apiVersion": "kubernetes.civo.m.upbound.io/v1beta1",
+                                "kind": "NodePool",
+                                "spec": {
+                                    "providerConfigRef": {"kind": "ProviderConfig", "name": "team-a"},
+                                    "forProvider": {
+                                        "label": "workers",
+                                        "size": "g4p.kube.small",
+                                        "region": "LON1",
+                                        "labels": {"modelplane.ai/pool": "workers"},
+                                        "clusterIdSelector": {"matchControllerRef": True},
+                                        "nodeCount": 2,
+                                    },
+                                },
+                            }
+                        ),
+                    ),
+                    "provider-config-helm": _provider_config(),
+                    "release-cluster-autoscaler": _autoscaler_release(autoscaling_groups=[]),
+                },
+            ),
+            context=structpb.Struct(),
+        ),
+    ),
+]
 
-        for case in cases:
-            with self.subTest(case.name):
-                got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
+
+@pytest.mark.parametrize("case", COMPOSE_CASES, ids=lambda case: case.name)
+def test_compose(case: Case) -> None:
+    """RunFunction composes a Civo cluster's infrastructure."""
+    got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
+    assert _to_dict(got) == _to_dict(case.want), case.reason

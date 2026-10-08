@@ -105,7 +105,8 @@ curl -fsSL https://install.determinate.systems/nix | sh -s -- install
 
 `nix flake check` runs all of the project's checks inside the Nix sandbox:
 Python, shell, and Nix linters and formatters, the [ty](https://docs.astral.sh/ty)
-type checker on every composition function, plus unit tests for every function.
+type checker on every composition function and the end-to-end tests, plus unit
+tests for every function.
 Run `nix flake show` to see what else is available.
 
 ```bash
@@ -120,7 +121,7 @@ composition function renders the right resources. The integration layer is
 `nix run .#e2e`, which brings up two local `kind` clusters and runs the
 whole path — scheduling, the serving-stack install on a registered cluster,
 gateway routing, a live request — with no cloud credentials. Add `-- --verify`
-and it waits for readiness, asserts a 200, and exits non-zero on failure. That
+and it runs the pytest suite in `e2e/tests/`, exiting non-zero if a test fails. That
 verify command is what the label-gated `E2E` workflow runs on CI (add the
 `test-e2e` label to a PR), so a green local `--verify` and a green CI run mean
 the same thing. See `e2e/README.md`.
@@ -245,7 +246,7 @@ functions/<name>/
     main.py           # CLI entrypoint (boilerplate)
     fn.py             # FunctionRunner gRPC service and Composer logic
   tests/
-    test_fn.py        # unittest-based tests for fn.py
+    test_fn.py        # pytest tests for fn.py
 ```
 
 The `Composer.compose()` method in `fn.py` reads the XR from the request,
@@ -274,65 +275,113 @@ XRDs or dependencies you've removed don't linger.
 
 ### Tests
 
-Every function has tests under `functions/<name>/tests/test_fn.py`. The
-canonical form is a table of `Case`s, each running the function on a
+Every function has tests under `functions/<name>/tests/`, run with
+[pytest](https://docs.pytest.org/). `test_fn.py` tests the function as a whole.
+A module with logic of its own, such as `compose-model-deployment`'s scheduler,
+can have its own `test_<module>.py` too.
+
+The canonical form is a table of `Case`s, each running the function on a
 `RunFunctionRequest` and comparing the whole `RunFunctionResponse` against an
-expected one — not asserting on individual fields. `compose-usages` is a clean
-example; `compose-model-cache` shows the same form scaled up to a multi-pass
-reconcile. The skeleton:
+expected one, rather than asserting on individual fields. `compose-model-cache`
+is a good example. The skeleton:
 
 ```python
 @dataclasses.dataclass
 class Case:
     name: str
+    reason: str
     req: fnv1.RunFunctionRequest
     want: fnv1.RunFunctionResponse
 
 
-def setUpModule() -> None:
-    logging.configure(level=logging.Level.DISABLED)
+COMPOSE_CASES = [
+    Case(
+        name="ClusterReady",
+        reason="Once the cluster is ready, the XR reports Ready.",
+        req=fnv1.RunFunctionRequest(...),
+        want=fnv1.RunFunctionResponse(...),
+    ),
+]
 
 
-class TestFunctionRunner(unittest.IsolatedAsyncioTestCase):
-    maxDiff = None
+def _to_dict(msg: message.Message) -> dict:
+    """msg as a dict with sorted keys, so pytest's diff of two lines them up."""
+    return json.loads(json_format.MessageToJson(msg, sort_keys=True))
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.runner = fn.FunctionRunner()
 
-    async def test_compose(self) -> None:
-        cases = [
-            Case(
-                name="describes what this case exercises",
-                req=fnv1.RunFunctionRequest(...),
-                want=fnv1.RunFunctionResponse(...),
-            ),
-        ]
-        for case in cases:
-            with self.subTest(case.name):
-                got = await self.runner.RunFunction(case.req, None)
-                self.assertEqual(
-                    json_format.MessageToDict(case.want),
-                    json_format.MessageToDict(got),
-                    "-want, +got",
-                )
+@pytest.mark.parametrize("case", COMPOSE_CASES, ids=lambda case: case.name)
+def test_compose(case: Case) -> None:
+    """RunFunction composes the resources an XR needs."""
+    got = asyncio.run(fn.FunctionRunner().RunFunction(case.req, None))
+    assert _to_dict(got) == _to_dict(case.want), case.reason
 ```
 
-Build the XR with
-`resource.dict_to_struct(xr.model_dump(exclude_none=True, mode="json"))` from a
-generated Pydantic model; build other observed, desired, and required resources
-as plain dicts. Because `want` is the whole response, it must include the parts
-the function always emits: `meta.ttl` (60s), an empty `context`, and any
-conditions, results, and requirements. Give observed conditions a fixed
-`lastTransitionTime` so the input is deterministic. Protobuf maps
-(`desired.resources`, `requirements.resources`) compare order-independently, but
-repeated fields (`conditions`, `results`, status arrays) must match the order
-the function emits.
+Name a table for the test that runs it, and put it just above that test. A
+`Case` holds its `name` and `reason`, then the inputs of the call under test,
+named for its parameters, then `want`. Each case becomes its own test, with its
+`name` as its ID, so `pytest -k` can select it. With `got` on the left, pytest's
+diff shows the expected lines as `-` and the actual lines as `+`, the same way
+round as Go's `cmp.Diff(want, got)`. Tests are plain functions, with no classes,
+fixtures, or `conftest.py`. They call the async `RunFunction` with `asyncio.run`
+rather than needing a plugin, and check errors with `pytest.raises(...,
+match=...)`.
 
-Some existing tests (`compose-serving-stack`, the second method in
-`compose-eks-cluster`) predate this form and assert on individual fields. Don't
-model new tests on them. Add new cases to the function's `test_fn.py` and run
-`nix flake check` to verify they pass.
+Cases are data, so a reader should be able to see everything a case asserts by
+reading it:
+
+- **Write each case out in full.** Repetition between cases is fine. Don't
+  derive one case from another, or from a shared base, by copying and mutating
+  it, and don't change a request or response once it's built. Pass
+  requirements, conditions, and results to the constructor.
+- **A resource that appears in three or more cases gets a helper,** the XR
+  included. Count resources by the role they play, such as "the GPU node pool"
+  or "an endpoint's Backend". An observed resource plays a different role from
+  the desired resource it reflects, so it gets its own helper. A helper builds
+  that one resource and returns the `fnv1.Resource` that carries it, or a dict
+  where another resource embeds it. Everything that varies between the cases
+  that use it is a keyword argument with no default, so every call shows every
+  value that varies. A desired resource's readiness is an `fnv1.Ready` value. A
+  flag that sets an observed resource's Ready condition is a bool. Write a
+  resource that appears in one or two cases inline. Never write a helper that
+  builds a whole request, response, map of resources, or case.
+- **Give each case a short name and a reason.** The `name` is a few words of
+  CamelCase, unique in its table, such as `JobComplete`. The `reason` is one
+  sentence saying what the case's input sets up and what it expects, and the
+  test passes it as the assertion's message, so pytest prints it when the case
+  fails. Put any further comment on a case directly above its `Case(`. A short
+  comment beside one value can explain that value.
+- **Compare the whole output, once.** A test that calls the same entry point
+  with different data belongs in that entry point's table as another case.
+- **Write values as literals,** in requests and expectations alike, including
+  names the function hashes. An expectation computed by code, whether the code
+  under test or the SDK's `child_name`, passes whatever that code does.
+- **Build the XR from its generated model,** with
+  `resource.dict_to_struct(xr.model_dump(exclude_none=True, mode="json",
+  by_alias=True))`. Write composed and observed resources as dicts in their wire
+  form. The generated models include schema defaults, so a model doesn't fix its
+  own wire form: the SDK sends only the fields a function sets, while the API
+  server fills in the defaults.
+- **Say why where a test departs from a rule,** in a comment beside the
+  departure.
+
+Because `want` is the whole response, it must include the parts the function
+always emits: `meta.ttl` (60s), an empty `context`, and any conditions, results,
+and requirements. Give observed conditions a fixed `lastTransitionTime` so the
+input is deterministic. Protobuf maps (`desired.resources`,
+`requirements.resources`) compare order-independently, but repeated fields
+(`conditions`, `results`, status arrays) must match the order the function
+emits.
+
+`nix flake check` runs every function's tests, and so does `nix run .#test`,
+outside the sandbox. Name a function to run only its tests, and pass pytest
+arguments after it:
+
+```bash
+nix run .#test -- compose-usages -k namespace
+```
+
+Each function runs in a pytest session of its own, because every function names
+its package `function`.
 
 ### Running locally
 

@@ -7,70 +7,31 @@
   pkgs,
   self,
   functionNames,
-  pyproject-nix,
-  uv2nix,
-  pyproject-build-systems,
+  pythonSet,
 }:
 let
   docs = import ./docs.nix { inherit pkgs self; };
 
-  workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = self; };
-  pythonSet =
-    (pkgs.callPackage pyproject-nix.build.packages { python = pkgs.python312; }).overrideScope
-      (
-        pkgs.lib.composeManyExtensions [
-          pyproject-build-systems.overlays.wheel
-          (workspace.mkPyprojectOverlay { sourcePreference = "wheel"; })
-        ]
-      );
-
   # Each function exports a 'function' Python module, so tests must run from
-  # a directory where that module is importable via the venv. We copy tests/
-  # from the source tree and run unittest against the venv's Python.
+  # a directory where that module is importable via the venv, and one pytest
+  # session can't hold two functions' tests. We copy tests/ from the source
+  # tree and run pytest against the venv's Python. We also copy pyproject.toml
+  # for its [tool.pytest] config, which pytest finds in its rootdir.
   mkFunctionTest =
     name:
     let
       venv = pythonSet.mkVirtualEnv "${name}-test-env" {
         ${name} = [ ];
+        pytest = [ ];
       };
     in
     pkgs.runCommand "modelplane-test-${name}" { } ''
       cp -r ${self}/functions/${name}/tests tests
-      ${venv}/bin/python -m unittest discover -s tests -v
+      cp ${self}/pyproject.toml pyproject.toml
+      ${venv}/bin/python -m pytest tests
       mkdir -p $out
       touch $out/.tests-passed
     '';
-
-  # Type-check each function with ty. Each function exports its own 'function'
-  # module, so checking all functions at once would let ty resolve one
-  # function's `function.fn` import to another's package. We check each in
-  # isolation against a venv that provides its dependencies, plus the protobuf
-  # type stubs ty needs to resolve the SDK's generated Struct and Duration.
-  #
-  # Unlike mkFunctionTest, which runs the function module from the venv, ty
-  # checks the source, so we copy function/ and tests/ from the tree. We also
-  # copy pyproject.toml: the sandbox has no parent tree for ty to discover the
-  # [tool.ty] config in, where the target Python version is set.
-  mkFunctionTypeCheck =
-    name:
-    let
-      venv = pythonSet.mkVirtualEnv "${name}-ty-env" {
-        ${name} = [ ];
-        types-protobuf = [ ];
-      };
-    in
-    pkgs.runCommand "modelplane-ty-${name}"
-      {
-        nativeBuildInputs = [ pkgs.unstable.ty ];
-      }
-      ''
-        cp -r ${self}/functions/${name}/function function
-        cp -r ${self}/functions/${name}/tests tests
-        cp ${self}/pyproject.toml pyproject.toml
-        ty check function tests --python ${venv}
-        mkdir -p $out
-        touch $out/.ty-passed
-      '';
 in
 {
   # Lint docs prose with Vale. The site that renders this content is the
@@ -99,6 +60,95 @@ in
       touch $out/.docs-manifests-validated
     '';
 
+  # Check the function unit tests against the rules in CONTRIBUTING.md's Tests
+  # section that an AST can decide, such as how a table and its test are laid
+  # out and what a case's name and reason look like. The checker uses only the
+  # standard library, so it runs on the plain interpreter.
+  function-test-style =
+    pkgs.runCommand "modelplane-function-test-style"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+      }
+      ''
+        cd ${self}
+        python3 hack/check_function_tests.py
+        mkdir -p $out
+        touch $out/.function-test-style-checked
+      '';
+
+  # Type-check our Python with ty. Every function's package is named
+  # `function`, so in one ty run one function's `from function import fn` could
+  # resolve to another function's package. ty instead runs once per function,
+  # against a venv that provides the function's dependencies, pytest, which the
+  # tests import, and the protobuf type stubs ty needs to resolve the SDK's
+  # generated Struct and Duration. It then runs on e2e/, against the packages
+  # the e2e app runs the tests with (see apps.nix), and on hack/, whose checker
+  # uses only the standard library and so needs no venv.
+  #
+  # Unlike mkFunctionTest, which runs the function module from the venv, ty
+  # checks the source, so we copy it from the tree: each function's function/
+  # and tests/ to a directory of its own that ty takes as the project, and e2e/
+  # and hack/ to the build directory. Each of those gets a copy of
+  # pyproject.toml for the [tool.ty] config, where the target Python version is
+  # set. ty also resolves first-party imports from the directory holding that
+  # config, so without a copy in a function's directory `function` would
+  # resolve to the package installed in the venv instead of the copied source.
+  #
+  # A failed run doesn't stop the rest, so one build reports every failure, and
+  # the log names each directory that failed.
+  ty =
+    let
+      functionVenvs = map (name: {
+        inherit name;
+        venv = pythonSet.mkVirtualEnv "${name}-ty-env" {
+          ${name} = [ ];
+          pytest = [ ];
+          types-protobuf = [ ];
+        };
+      }) functionNames;
+      e2eVenv = pythonSet.mkVirtualEnv "e2e-ty-env" {
+        pytest = [ ];
+        kubernetes = [ ];
+        crossplane-models = [ ];
+        pydantic = [ ];
+      };
+    in
+    pkgs.runCommand "modelplane-ty"
+      {
+        nativeBuildInputs = [ pkgs.unstable.ty ];
+      }
+      ''
+        cp -r ${self}/e2e ${self}/hack ${self}/pyproject.toml .
+
+        failed=()
+        check() {
+          local name="$1"
+          shift
+          echo "ty check $name"
+          ty check --no-progress "$@" || failed+=("$name")
+        }
+
+        check_function() {
+          local dir="functions/$1" venv="$2"
+          mkdir -p "$dir"
+          cp -r "${self}/$dir/function" "${self}/$dir/tests" pyproject.toml "$dir"
+          check "$dir" --project "$dir" --python "$venv" "$dir"
+        }
+
+        ${pkgs.lib.concatMapStrings (f: ''
+          check_function ${f.name} ${f.venv}
+        '') functionVenvs}
+        check e2e --python ${e2eVenv} e2e
+        check hack hack
+
+        if [ ''${#failed[@]} -gt 0 ]; then
+          echo "ty found errors in: ''${failed[*]}" >&2
+          exit 1
+        fi
+        mkdir -p $out
+        touch $out/.ty-passed
+      '';
+
   python =
     pkgs.runCommand "modelplane-python-checks"
       {
@@ -108,8 +158,8 @@ in
         cp -r ${self} src
         chmod -R u+w src
         cd src
-        ruff format --check functions/ docs/utils/validate/
-        ruff check functions/ docs/utils/validate/
+        ruff format --check functions/ docs/utils/validate/ hack/ e2e/
+        ruff check functions/ docs/utils/validate/ hack/ e2e/
         mkdir -p $out
         touch $out/.python-checks-passed
       '';
@@ -143,11 +193,12 @@ in
       '';
 
   # Fail if any hand-written source file is missing its Apache 2.0 license
-  # header. Scoped to the files we author: the composition functions and the
-  # docs manifest validator. Generated models under schemas/python carry their
-  # own codegen banner, and config (*.toml) and vendored upstream CRDs (*.yaml)
-  # are excluded. addlicense -check only reads, so it runs against the store
-  # path directly. Run 'nix run .#fix' to add any missing headers.
+  # header. Scoped to the files we author: the composition functions, the docs
+  # manifest validator, the scripts in hack/, and the end-to-end tests.
+  # Generated models under schemas/python carry their own codegen banner, and
+  # config (*.toml) and vendored upstream CRDs (*.yaml) are excluded.
+  # addlicense -check only reads, so it runs against the store path directly.
+  # Run 'nix run .#fix' to add any missing headers.
   license =
     pkgs.runCommand "modelplane-license-check"
       {
@@ -159,7 +210,7 @@ in
           -ignore '**/*.toml' \
           -ignore '**/*.yaml' \
           -ignore '**/*.yml' \
-          functions/ docs/utils/validate/ nix.sh
+          functions/ docs/utils/validate/ hack/ e2e/ nix.sh
         mkdir -p $out
         touch $out/.license-check-passed
       '';
@@ -233,11 +284,5 @@ in
   map (name: {
     name = "test-${name}";
     value = mkFunctionTest name;
-  }) functionNames
-)
-// builtins.listToAttrs (
-  map (name: {
-    name = "ty-${name}";
-    value = mkFunctionTypeCheck name;
   }) functionNames
 )
